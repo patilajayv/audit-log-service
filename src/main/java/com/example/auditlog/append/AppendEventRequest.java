@@ -31,7 +31,7 @@ public record AppendEventRequest(
         requireNonBlank(actorId, "actorId");
         requireNonBlank(resourceType, "resourceType");
         requireNonBlank(resourceId, "resourceId");
-        if (payload == null) {
+        if (payload == null || payload.isNull()) {
             throw new IllegalArgumentException("payload must not be null");
         }
         if (!payload.isObject()) {
