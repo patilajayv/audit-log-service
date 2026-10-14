@@ -27,8 +27,10 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataIntegrityViolationException;
+import com.example.auditlog.security.SecurityConfiguration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
@@ -37,7 +39,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * timestamp normalization, error sanitization, and status codes.
  */
 @WebMvcTest(AuditEventController.class)
-@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class})
+@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class, SecurityConfiguration.class})
+@WithMockUser(username = "test-writer", roles = "AUDIT_WRITER")
 class AuditEventControllerWebMvcTest {
 
     private static final UUID EVENT_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");

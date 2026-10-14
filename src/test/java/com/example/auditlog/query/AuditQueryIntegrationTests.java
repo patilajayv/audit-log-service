@@ -67,6 +67,8 @@ class AuditQueryIntegrationTests {
     }
 
     @Autowired
+    private TestRestTemplate rawRestTemplate;
+
     private TestRestTemplate restTemplate;
 
     @Autowired
@@ -83,6 +85,7 @@ class AuditQueryIntegrationTests {
 
     @BeforeEach
     void cleanAndMigrate() {
+        this.restTemplate = rawRestTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
         flyway.clean();
         flyway.migrate();
     }

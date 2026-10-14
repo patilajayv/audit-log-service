@@ -133,10 +133,41 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Required cursor-based streaming (`fetchSize = 500`) to avoid memory saturation and confirmed immediate violation stoppage.
   - Clarified the precise security boundary: internal verification detects corruption and tampering relative to the stored chain and head, but cannot detect full-chain rewriting by a superuser without an external trusted anchor.
   - Directed administrative tampering to be performed strictly within isolated Testcontainers databases using temporary trigger toggling, leaving production and local databases untouched.
-- **Decision:** Pending engineer review. Milestone 7 changes uncommitted locally.
+- **Decision:** Approved by the engineer. Committed locally as `01d5460` with message `feat: implement audit chain verification and tamper detection` (local commit; unpushed to `origin`).
 - **Validation:**
   - Automated test results under Java 17.0.16 / Maven 3.9.11:
     - `AuditEventVerifyControllerWebMvcTest`: 3 tests run, 0 failures, 0 errors, 0 skipped.
     - `AuditVerificationIntegrationTests`: 15 tests run, 0 failures, 0 errors, 0 skipped.
     - Full Maven suite: 125 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.
+
+## 2026-10-15 - Milestone 8 authentication, authorization, and least-privilege access
+
+- **Task:** Implement stateless HTTP Basic authentication, BCrypt password hashing, role-based authorization (`AUDIT_WRITER`, `AUDITOR`), sanitized 401/403 error handling, external credential sourcing with fail-fast production validation, and database immutability verification.
+- **AI contribution:**
+  - Added `spring-boot-starter-security` and `spring-security-test` to `pom.xml` compatible with Spring Boot 3.4.5 without upgrading Spring Boot.
+  - Implemented `SecurityUserProperties` mapping external credentials for writer and auditor accounts.
+  - Implemented `RestAuthenticationEntryPoint` emitting sanitized JSON `ErrorResponse` (401 Unauthorized) while preserving the `WWW-Authenticate: Basic realm="AuditLogService"` header.
+  - Implemented `RestAccessDeniedHandler` emitting sanitized JSON `ErrorResponse` (403 Forbidden) without leaking internal security details.
+  - Implemented `SecurityConfiguration` enforcing stateless session creation (`STATELESS`), disabling CSRF for stateless REST operations, encoding passwords with `BCryptPasswordEncoder`, registering in-memory user details, configuring role authorization (`POST /audit/events` -> `AUDIT_WRITER`, `GET /audit/events` -> `AUDITOR`, `GET /audit/verify` -> `AUDITOR`, and default deny `.anyRequest().denyAll()`), and validating production credentials at startup to reject empty or insecure placeholder defaults (`IllegalStateException`).
+  - Isolated default development credentials to `local` profile in `application-local.yaml` and dedicated test credentials in `src/test/resources/application.yaml`.
+  - Updated existing WebMvc slice tests (`AuditEventControllerWebMvcTest`, `AuditEventQueryControllerWebMvcTest`, `AuditEventVerifyControllerWebMvcTest`) with `@WithMockUser` and imported `SecurityConfiguration`.
+  - Updated existing integration tests (`AuditEventControllerIntegrationTests`, `AuditQueryIntegrationTests`, `AuditVerificationIntegrationTests`) with basic authentication.
+  - Implemented `AuditSecurityIntegrationTests` (13 tests) against Testcontainers PostgreSQL 16 verifying unauthenticated 401 with `WWW-Authenticate`, bad credentials 401, cross-role 403, authorized 200/201, unmapped route default deny, and database immutability assertions ensuring rejected requests never modify `audit_event` rows, sequence numbers, or `audit_chain_head`.
+  - Implemented `SecurityCredentialValidationTests` (7 tests) verifying fail-fast startup behavior in production mode and safe startup in test/local profiles.
+- **Engineer oversight:**
+  - Constrained Spring Boot version: prohibited upgrading Spring Boot 3.4.5; added managed Spring Security starters.
+  - Mandated stateless HTTP Basic authentication with BCrypt hashing and strict role segregation (`AUDIT_WRITER` cannot query or verify; `AUDITOR` cannot append).
+  - Required sanitized JSON error responses matching the existing `ErrorResponse` schema, explicitly preserving `WWW-Authenticate: Basic realm="AuditLogService"` on 401 and omitting it on 403.
+  - Mandated external credential sourcing and fail-fast startup validation rejecting empty or default passwords in production mode.
+  - Required verification that rejected 401 and 403 requests strictly preserve database invariants (no rows inserted, no sequence or chain-head advancement).
+- **Decision:** Pending engineer review. Milestone 8 changes uncommitted locally.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditSecurityIntegrationTests`: 13 tests run, 0 failures, 0 errors, 0 skipped.
+    - `SecurityCredentialValidationTests`: 7 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditEventControllerWebMvcTest`: 18 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditEventQueryControllerWebMvcTest`: 9 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditEventVerifyControllerWebMvcTest`: 3 tests run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 145 tests run, 0 failures, 0 errors, 0 skipped.
   - `git diff --check` passed with 0 errors.

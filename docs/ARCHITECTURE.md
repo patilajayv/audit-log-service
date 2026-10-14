@@ -172,14 +172,32 @@ The required tampering demonstration uses a separately authorized administrative
 
 ## Security
 
-The prototype uses stateless HTTP Basic authentication over TLS outside local development. Passwords use BCrypt hashes and credentials come from environment-backed configuration rather than source control. CSRF is disabled because this API uses stateless `Authorization` headers and does not use browser-managed sessions.
+The service implements stateless HTTP Basic authentication and role-based access control using Spring Security:
 
-| Role | Allowed operations |
-| --- | --- |
-| `AUDIT_WRITER` | Create audit events. |
-| `AUDITOR` | Query events, verify the chain, and export records. |
+1. **Session and CSRF management**: Operates strictly in stateless mode (`SessionCreationPolicy.STATELESS`). CSRF protection is disabled (`AbstractHttpConfigurer::disable`) because the API relies on stateless HTTP Basic authorization headers rather than browser cookie-based sessions.
+2. **Password encoding**: All user passwords are encrypted using `BCryptPasswordEncoder`.
+3. **Role-based authorization and default deny**:
+   - `POST /audit/events`: requires role `AUDIT_WRITER`
+   - `GET /audit/events`: requires role `AUDITOR`
+   - `GET /audit/verify`: requires role `AUDITOR`
+   - All other routes are denied by default via `.anyRequest().denyAll()`.
+4. **Sanitized error handling**:
+   - **401 Unauthorized**: Handled by `RestAuthenticationEntryPoint`. Emits a sanitized JSON `ErrorResponse(401, "Unauthorized", "Full authentication is required to access this resource", timestamp)` and preserves the standard `WWW-Authenticate: Basic realm="AuditLogService"` header.
+   - **403 Forbidden**: Handled by `RestAccessDeniedHandler`. Emits a sanitized JSON `ErrorResponse(403, "Forbidden", "Access is denied: insufficient role privileges", timestamp)` without disclosure of internal security rules or stack traces, and omits the `WWW-Authenticate` header.
+5. **External credential configuration and fail-fast startup validation**:
+   - Configured via `SecurityUserProperties` mapped from `audit.security.writer.*` and `audit.security.auditor.*`.
+   - **Production mode**: In non-local, non-test environments, application startup performs strict fail-fast validation. If either username or password is missing/blank, password length is under 8 characters, or passwords match known insecure default placeholders (`password`, `changeme`, `admin`, `secret`, `writer-secret`, `auditor-secret`, etc.), context initialization throws an `IllegalStateException` and aborts startup.
+   - **Local development mode**: Isolated to the `local` profile in `application-local.yaml`.
+   - **Test mode**: Provided with dedicated, non-production test credentials in `src/test/resources/application.yaml`.
+6. **Database immutability invariant**:
+   - Requests rejected with HTTP 401 or HTTP 403 are intercepted before controller or database layer execution, guaranteeing that unauthenticated and unauthorized requests never modify `audit_event` rows, sequence numbers, or `audit_chain_head` state.
 
-Production controls would add centralized identity, short-lived credentials, TLS termination, secret management, network restrictions, auditing of privileged database access, and separate operational roles.
+| Role | Allowed operations | Prohibited operations |
+| --- | --- | --- |
+| `AUDIT_WRITER` | Create audit events (`POST /audit/events`). | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`). |
+| `AUDITOR` | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`), export records. | Create audit events (`POST /audit/events`). |
+
+Production controls would add centralized identity (OIDC/OAuth2/mTLS), short-lived token issuance, secret management (Vault/AWS Secrets Manager), network policy restrictions, auditing of privileged database access, and separate operational roles.
 
 ## Retention, redaction, and export
 

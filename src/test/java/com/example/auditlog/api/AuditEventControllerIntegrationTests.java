@@ -70,6 +70,8 @@ class AuditEventControllerIntegrationTests {
     }
 
     @Autowired
+    private TestRestTemplate rawRestTemplate;
+
     private TestRestTemplate restTemplate;
 
     @Autowired
@@ -83,6 +85,7 @@ class AuditEventControllerIntegrationTests {
 
     @BeforeEach
     void cleanAndMigrate() {
+        this.restTemplate = rawRestTemplate.withBasicAuth("test-writer", "test-writer-password-123");
         flyway.clean();
         flyway.migrate();
     }

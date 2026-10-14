@@ -40,6 +40,11 @@ This document separates assignment requirements from engineering choices. "Requi
 - Verification response cleanly separates declared chain-head metadata from verified values (`recordsVerified`, `headSequenceNo`, `headRecordHash`, `lastVerifiedSequenceNo`, `lastVerifiedRecordHash`, `violation`).
 - Missing or malformed singleton `audit_chain_head` row is reported as a structured `CHAIN_HEAD_MISMATCH` inconsistency rather than a generic database exception.
 - Verification detects corruption and tampering relative to the local stored chain and head; detecting complete history rewriting by a superuser requires an external trusted anchor.
+- Stateless HTTP Basic authentication with BCrypt password hashing enforces least-privilege role separation: `POST /audit/events` requires `AUDIT_WRITER`, `GET /audit/events` requires `AUDITOR`, and `GET /audit/verify` requires `AUDITOR`. All unmapped routes are denied by default (`.anyRequest().denyAll()`).
+- Unauthenticated requests receive sanitized HTTP 401 `ErrorResponse` with standard `WWW-Authenticate: Basic realm="AuditLogService"` header. Insufficiently privileged requests receive sanitized HTTP 403 `ErrorResponse` without `WWW-Authenticate`.
+- External credential sourcing via environment variables (`AUDIT_SECURITY_WRITER_USERNAME`, `AUDIT_SECURITY_WRITER_PASSWORD`, etc.) with fail-fast startup validation in production mode rejecting empty, short (< 8 chars), or insecure placeholder defaults (`password`, `changeme`, `secret`, `admin`, `writer-secret`, `auditor-secret`, etc.).
+- Safe development defaults isolated to `application-local.yaml` under `local` profile, and dedicated test credentials in `src/test/resources/application.yaml`.
+- 401 and 403 rejections are intercepted at filter layer before execution, guaranteeing database records and chain-head state remain strictly unmodified.
 
 ### Acceptance criteria
 
@@ -50,6 +55,14 @@ This document separates assignment requirements from engineering choices. "Requi
 - Invalid query parameters return sanitized HTTP 400 responses without disclosing internal errors or stack traces.
 - `GET /audit/verify` returns `200 OK` with `status: "INTACT"` for empty and valid chains.
 - Direct modifications to stored payloads, content hashes, genesis hash, previous-hash links, record hashes, deleted events (first, middle, trailing), or altered chain-head state cause `/audit/verify` to return `200 OK` with `status: "CORRUPTED"` and the exact violation type and sequence.
+- Unauthenticated requests to any endpoint return HTTP 401 with `WWW-Authenticate: Basic realm="AuditLogService"` and sanitized `ErrorResponse`.
+- Invalid credentials return HTTP 401 with `WWW-Authenticate` header.
+- `AUDITOR` callers attempting to invoke `POST /audit/events` receive HTTP 403 without `WWW-Authenticate` header.
+- `AUDIT_WRITER` callers attempting to invoke `GET /audit/events` or `GET /audit/verify` receive HTTP 403 without `WWW-Authenticate` header.
+- Valid `AUDIT_WRITER` credentials successfully append events (HTTP 201); valid `AUDITOR` credentials successfully query (HTTP 200) and verify (HTTP 200).
+- Unmapped routes return HTTP 401 when unauthenticated and HTTP 403 when authenticated.
+- Rejected (401/403) append requests never insert records or alter `audit_chain_head` sequence or hash.
+- Production startup terminates with `IllegalStateException` when credentials are missing, shorter than 8 characters, or set to insecure defaults.
 
 ## Scenario B: Retention, Redaction, and Export
 

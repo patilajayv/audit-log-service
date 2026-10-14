@@ -27,9 +27,11 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import com.example.auditlog.security.SecurityConfiguration;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
@@ -37,7 +39,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * parameter mapping, pagination defaults, input validation, error handling, and response schema.
  */
 @WebMvcTest(AuditEventController.class)
-@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class})
+@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class, SecurityConfiguration.class})
+@WithMockUser(username = "test-auditor", roles = "AUDITOR")
 class AuditEventQueryControllerWebMvcTest {
 
     private static final UUID EVENT_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");

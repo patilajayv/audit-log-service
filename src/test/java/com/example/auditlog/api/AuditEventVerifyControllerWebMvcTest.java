@@ -22,6 +22,8 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import com.example.auditlog.security.SecurityConfiguration;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
@@ -29,7 +31,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * response serialization for intact and corrupted chains, and diagnostic status.
  */
 @WebMvcTest(AuditVerificationController.class)
-@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class})
+@Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class, SecurityConfiguration.class})
+@WithMockUser(username = "test-auditor", roles = "AUDITOR")
 class AuditEventVerifyControllerWebMvcTest {
 
     private static final String SAMPLE_RECORD_HASH =

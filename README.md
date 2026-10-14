@@ -4,9 +4,15 @@ This repository contains a Java 17 and Spring Boot 3 prototype for the Audit Log
 
 ## Current milestone
 
-Milestone 7 is implemented (changes uncommitted locally pending review). The application exposes the complete-chain verification REST API (`GET /audit/verify`) backed by `AuditVerificationService`, performing cryptographic hash chain recomputation, sequence contiguity checks, genesis and previous-hash validation, RFC 8785 canonical content hash validation, record hash recomputation, and chain-head pointer validation using streaming cursors and immediate violation stoppage. Milestone 6 (`GET /audit/events`) is committed locally as `b9739f0`, and Milestone 5 (`POST /audit/events`) is committed as `53d5bcb`.
+Milestone 8 is implemented (changes uncommitted locally pending review). The application enforces stateless HTTP Basic authentication with BCrypt password hashing and role-based access control across all endpoints:
+- `POST /audit/events`: requires role `AUDIT_WRITER`
+- `GET /audit/events`: requires role `AUDITOR`
+- `GET /audit/verify`: requires role `AUDITOR`
+- All other routes are denied by default.
 
-Subsequent milestones will add Spring Security role authorization (`AUDIT_WRITER`, `AUDITOR`), Scenario B archival and redaction workflows, and verifiable export bundles.
+Unauthenticated requests receive a sanitized HTTP 401 `ErrorResponse` preserving the `WWW-Authenticate: Basic realm="AuditLogService"` header. Insufficiently privileged requests receive a sanitized HTTP 403 `ErrorResponse`. Insecure or missing credentials in production mode cause fail-fast application startup termination. Milestone 7 (`GET /audit/verify`) is committed locally as `01d5460`, Milestone 6 (`GET /audit/events`) is committed as `b9739f0`, and Milestone 5 (`POST /audit/events`) is committed as `53d5bcb`.
+
+Subsequent milestones will add Scenario B archival and redaction workflows and verifiable export bundles.
 
 ## Prerequisites
 
@@ -18,13 +24,13 @@ The test suite runs against Java 17. Use a Java 17 JDK when validating this proj
 
 ## Build and test
 
-Run the full suite of 125 unit and integration tests:
+Run the full suite of 145 unit and integration tests:
 
 ```bash
 mvn test
 ```
 
-The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 15 database migration tests, 1 application context test, 18 append WebMvc controller slice tests, 7 append end-to-end HTTP/database integration tests, 9 query WebMvc controller slice tests, 10 query end-to-end HTTP/database integration tests, 3 verify WebMvc controller slice tests, and 15 verify/tamper end-to-end HTTP/database integration tests.
+The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 15 database migration tests, 1 application context test, 18 append WebMvc controller slice tests, 7 append end-to-end HTTP/database integration tests, 9 query WebMvc controller slice tests, 10 query end-to-end HTTP/database integration tests, 3 verify WebMvc controller slice tests, 15 verify/tamper end-to-end HTTP/database integration tests, 13 security/authorization end-to-end HTTP/database integration tests, and 7 security credential validation unit/context tests.
 
 ## Local PostgreSQL
 

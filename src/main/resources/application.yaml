@@ -1,3 +1,12 @@
 spring:
   application:
     name: audit-log-service
+
+audit:
+  security:
+    writer:
+      username: ${AUDIT_SECURITY_WRITER_USERNAME:}
+      password: ${AUDIT_SECURITY_WRITER_PASSWORD:}
+    auditor:
+      username: ${AUDIT_SECURITY_AUDITOR_USERNAME:}
+      password: ${AUDIT_SECURITY_AUDITOR_PASSWORD:}

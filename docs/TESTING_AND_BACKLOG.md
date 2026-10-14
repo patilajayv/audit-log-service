@@ -94,6 +94,38 @@ The full Maven test suite passed under Java 17.0.16 with **125 tests run, 0 fail
   - Read-only invariant check: asserts row counts and chain-head values are 100% unaltered after multiple verification calls.
 - **Previous baseline tests (107 tests)**: `AuditEventControllerWebMvcTest` (18 tests), `AuditEventControllerIntegrationTests` (7 tests), `AuditEventQueryControllerWebMvcTest` (9 tests), `AuditQueryIntegrationTests` (10 tests), `AuditHashServiceTest` (29 tests), `AuditAppendServiceIntegrationTests` (18 tests), `FlywayMigrationIntegrationTests` (15 tests), and `AuditLogServiceApplicationTests` (1 test) continue to pass without regression.
 
+## Milestone 8 validation status
+
+Milestone 8 implemented stateless HTTP Basic authentication, BCrypt password hashing, and role-based access control across all audit service endpoints, with sanitized 401/403 error responses, external credential sourcing, fail-fast production startup validation, and database immutability verification. Milestone 8 changes are currently uncommitted locally pending review.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **145 tests run, 0 failures, 0 errors, and 0 skipped**:
+
+- **`AuditSecurityIntegrationTests` (13 tests)**: End-to-end HTTP-to-database security integration tests against isolated Testcontainers PostgreSQL 16:
+  - `POST /audit/events`: unauthenticated request returns HTTP 401 with `WWW-Authenticate: Basic realm="AuditLogService"` and sanitized `ErrorResponse`.
+  - `POST /audit/events`: invalid credentials return HTTP 401 with `WWW-Authenticate` header.
+  - `POST /audit/events`: caller with `AUDITOR` role returns HTTP 403 Forbidden without `WWW-Authenticate` header.
+  - `POST /audit/events`: caller with `AUDIT_WRITER` role succeeds with HTTP 201 Created and advances chain.
+  - `GET /audit/events`: unauthenticated request returns HTTP 401 with `WWW-Authenticate` header.
+  - `GET /audit/events`: caller with `AUDIT_WRITER` role returns HTTP 403 Forbidden.
+  - `GET /audit/events`: caller with `AUDITOR` role succeeds with HTTP 200 OK.
+  - `GET /audit/verify`: unauthenticated request returns HTTP 401 with `WWW-Authenticate` header.
+  - `GET /audit/verify`: caller with `AUDIT_WRITER` role returns HTTP 403 Forbidden.
+  - `GET /audit/verify`: caller with `AUDITOR` role succeeds with HTTP 200 OK.
+  - Unmapped route: unauthenticated request returns HTTP 401 with `WWW-Authenticate` header.
+  - Unmapped route: authenticated caller returns HTTP 403 Forbidden (default deny).
+  - Database immutability verification: rejected (401/403) append attempts strictly leave row counts, sequences, and chain head untouched.
+- **`SecurityCredentialValidationTests` (7 tests)**: Spring `ApplicationContextRunner` tests verifying production credential sourcing and fail-fast startup validation:
+  - Rejection when writer username is missing in production mode (`IllegalStateException`).
+  - Rejection when writer password is missing in production mode (`IllegalStateException`).
+  - Rejection when password length is under 8 characters (`IllegalStateException`).
+  - Rejection when password is an insecure placeholder (`writer-secret`, `password`, etc.) in production mode.
+  - Successful startup with dedicated strong production credentials.
+  - Successful startup in `test` profile with safe test defaults.
+  - Successful startup in `local` profile with safe local defaults.
+- **Previous baseline tests (125 tests)**: All 18 append WebMvc tests, 7 append integration tests, 9 query WebMvc tests, 10 query integration tests, 3 verify WebMvc tests, 15 verify integration tests, 29 hash unit tests, 18 append service tests, 15 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -103,7 +135,7 @@ The full Maven test suite passed under Java 17.0.16 with **125 tests run, 0 fail
 5. [x] Implement the event creation REST API (`POST /audit/events`) and validation tests. (Milestone 5)
 6. [x] Implement filtered query API (`GET /audit/events`) and stable pagination. (Milestone 6)
 7. [x] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests. (Milestone 7)
-8. [ ] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests.
+8. [x] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests. (Milestone 8)
 9. [ ] Implement deferred Scenario B archive-metadata migration, archival workflow, redacted projections, and verifiable export (`GET /audit/exports`).
 10. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
 11. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.

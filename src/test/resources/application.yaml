@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: audit-log-service
+  profiles:
+    active: test
+
+audit:
+  security:
+    writer:
+      username: test-writer
+      password: test-writer-password-123
+    auditor:
+      username: test-auditor
+      password: test-auditor-password-123

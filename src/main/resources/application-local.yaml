@@ -9,3 +9,12 @@ spring:
     user: ${AUDIT_MIGRATOR_DB_USER:audit_migrator}
     password: ${AUDIT_MIGRATOR_DB_PASSWORD:local-migrator-password}
     locations: classpath:db/migration
+
+audit:
+  security:
+    writer:
+      username: ${AUDIT_SECURITY_WRITER_USERNAME:local_writer}
+      password: ${AUDIT_SECURITY_WRITER_PASSWORD:local-writer-secret-password}
+    auditor:
+      username: ${AUDIT_SECURITY_AUDITOR_USERNAME:local_auditor}
+      password: ${AUDIT_SECURITY_AUDITOR_PASSWORD:local-auditor-secret-password}
