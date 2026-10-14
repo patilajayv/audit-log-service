@@ -15,12 +15,23 @@
 
 | Endpoint | Contract | Authorization |
 | --- | --- | --- |
-| `POST /audit/events` | Accepts `eventType`, `actorId`, `resourceType`, `resourceId`, `payload`, and optional `sourceTimestamp`; returns `201` with event ID, sequence, server time, and hashes. | `AUDIT_WRITER` |
+| `POST /audit/events` | Accepts `eventType`, `actorId`, `resourceType`, `resourceId`, `payload`, and optional `sourceTimestamp`; returns `201` with event ID, sequence, server time, and hashes. Enforces a 1 MiB request body limit (HTTP 413) and strict duplicate key detection (HTTP 400). | `AUDIT_WRITER` |
 | `GET /audit/events` | Optional `actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`, `page`, `size`, and later `includeArchived`; returns a stable sequence-ordered page. | `AUDITOR` |
 | `GET /audit/verify` | Verifies the full global chain; returns intact status or first sequence and violation type. | `AUDITOR` |
 | `GET /audit/exports` | Scenario B endpoint. Requires exactly one of `actorId` or `resourceId`; returns a verifiable bundle. | `AUDITOR` |
 
 No `PUT`, `PATCH`, or `DELETE` audit-event endpoint will exist. Unauthenticated requests receive `401`; authenticated callers without the required role receive `403`.
+
+### Write API protocol (`POST /audit/events`)
+
+The write API is implemented by `AuditEventController` and protected by defensive servlet-level and controller-advice filters:
+
+1. **Size enforcement (`RequestBodySizeLimitFilter`)**: Registered with `HIGHEST_PRECEDENCE`. Evaluates declared `Content-Length` and wraps chunked/streaming input streams with a byte counter. Bodies exceeding 1 MiB (1,048,576 bytes) are aborted with HTTP 413 before deserialization or append invocation.
+2. **Strict duplicate key detection**: Configured globally in Jackson (`JsonParser.Feature.STRICT_DUPLICATE_DETECTION`). Requests with duplicate JSON keys at the root level or within nested `payload` objects are rejected with HTTP 400.
+3. **Payload validation**: Null or non-object payloads and integers outside safe IEEE-754 range $[-(2^{53}-1), 2^{53}-1]$ are rejected with HTTP 400.
+4. **Timestamp normalization**: Omitted timestamps default to `null`. Offset-bearing timestamps (e.g. `+02:00`) are parsed to UTC `Instant` and normalized to millisecond precision (`ChronoUnit.MILLIS`).
+5. **Delegation**: Delegates directly to transactional `AuditAppendService.append(request)`.
+6. **Error handling and sanitization (`AuditControllerAdvice`)**: Maps handled exception categories to appropriate HTTP status codes: client syntax and validation failures (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `IllegalArgumentException`) to HTTP 400; body size limit exceedance (`PayloadTooLargeException`) to HTTP 413; media type mismatches (`HttpMediaTypeNotSupportedException`) to HTTP 415; unsupported methods (`HttpRequestMethodNotSupportedException`) to HTTP 405; and chain-head lock contention (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `QueryTimeoutException`) to HTTP 503 with a `Retry-After: 1` header. For database failures (`DataAccessException`, `SQLException`) and unexpected errors (`Exception`), it emits sanitized generic HTTP 500 responses (`"An internal database error occurred while recording the audit event."` or `"An internal error occurred while processing the audit event."`), actively suppressing SQL syntax, table names, constraint details, and stack traces. Operational logs record correlation IDs, `eventId`, and `sequenceNo`, while omitting sensitive event `payload`, `actorId`, and `resourceId` values.
 
 ## Data model
 
@@ -117,7 +128,7 @@ Violation types include `GENESIS_MISMATCH`, `SEQUENCE_GAP`, `CONTENT_HASH_MISMAT
 
 The normal application database role receives only the minimum `SELECT` and `INSERT` rights for audit events. Migration and administrative identities are separate. PostgreSQL triggers reject `UPDATE`, `DELETE`, and `TRUNCATE` against `audit_event`; normal application APIs expose no mutation routes.
 
-For local development, Docker Compose starts PostgreSQL as `audit_migrator` and bootstraps the limited `audit_app` role. Flyway runs with the migrator identity; the application uses `audit_app`. PostgreSQL is bound only to the loopback interface for host access. Operational environments must provision equivalent roles before migration. These controls prevent accidental application mutations, but schema owners and superusers can change permissions, disable triggers, or rewrite data.
+For local development, Docker Compose starts PostgreSQL 16 as `audit_migrator` and bootstraps the limited `audit_app` role. Flyway runs with the migrator identity; the application uses `audit_app`. PostgreSQL is bound to the loopback interface (`127.0.0.1:5432`, or `127.0.0.1:5433` via local override when port 5432 is occupied by an existing host database). Operational environments must provision equivalent roles before migration. These controls prevent accidental application mutations, but schema owners and superusers can change permissions, disable triggers, or rewrite data.
 
 The required tampering demonstration uses a separately authorized administrative connection in a documented test procedure. It temporarily bypasses the protection or uses a maintenance-only path to alter a row, then calls the ordinary verification API. The application role never receives update or delete rights.
 

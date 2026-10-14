@@ -27,10 +27,15 @@ This document separates assignment requirements from engineering choices. "Requi
 - Numeric limits follow RFC 8785 Appendix D and RFC 7493 (I-JSON §2.2): Integers in the safe IEEE-754 range [-(2^53 - 1), 2^53 - 1] serialize as numbers; integers outside this range and non-finite floats are actively rejected. Exact 64-bit or arbitrary-precision values must be encoded as JSON strings. Duplicate object keys are rejected.
 - Timestamps (`recordedAt` and optional `sourceTimestamp`) are normalized to UTC milliseconds (`ChronoUnit.MILLIS`) upon assignment/ingestion.
 - `record_hash` uses 4-byte big-endian length-prefixed domain separation over `AUDIT_RECORD_V1`, decimal sequence, previous hash, and content hash to prevent field-boundary ambiguity.
+- Request-body size is strictly limited to 1 MiB (1,048,576 bytes) via servlet filter on both declared-length and chunked/streaming requests, returning HTTP 413 before deserialization.
+- Strict duplicate-key detection is enforced globally across root request properties and nested payload objects (RFC 8785 §3.2.3), returning HTTP 400.
+- Handled errors return sanitized responses without disclosing SQL syntax, table names, constraint details, or stack traces, while unexpected exceptions receive a generic HTTP 500 response. Transient lock contention (SQLState `55P03`) returns HTTP 503 with `Retry-After: 1`.
+- Operational logging omits `actorId`, `resourceId`, and event `payload`; requests are traced via correlation IDs.
 
 ### Acceptance criteria
 
-- A valid event is appended with a monotonic sequence, its hashes, and the prior record hash.
+- A valid event is appended via `POST /audit/events`, returning `201 Created` with monotonic sequence, assigned UUID, hashes, and previous hash.
+- Oversized (> 1 MiB), duplicate-key, or malformed requests are rejected without inserting rows or advancing the chain head.
 - All documented filter combinations return the expected stable pages.
 - Direct changes to payloads, hashes, links, or row presence cause `/audit/verify` to report the first detectable violation.
 

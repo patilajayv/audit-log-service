@@ -32,13 +32,36 @@ The full Maven test suite passed under Java 17.0.16 with **63 tests run, 0 failu
 - **`FlywayMigrationIntegrationTests` (15 tests)**: Confirms V1/V2 migration baseline, trigger protections, and rollback on malformed existing state.
 - **`AuditLogServiceApplicationTests` (1 test)**: Confirms Spring Boot application context loads cleanly with configured mock dependencies.
 
+## Milestone 5 validation status
+
+Milestone 5 implemented and committed locally as `53d5bcb` (unpushed to `origin`) the event creation REST API (`POST /audit/events`), 1 MiB request body size enforcement via `RequestBodySizeLimitFilter`, strict duplicate-key rejection (root and nested), timestamp normalization, and sanitized error handling. Live smoke tests against an isolated local PostgreSQL 16 database on `127.0.0.1:5433` confirmed migration and runtime behavior.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **88 tests run, 0 failures, 0 errors, and 0 skipped**:
+
+- **`AuditEventControllerWebMvcTest` (18 tests)**: MockMvc unit tests covering successful event creation (HTTP 201), omitted optional `sourceTimestamp`, offset-bearing timestamp normalization to UTC `Instant`, string preservation for large numbers, validation rejection for missing/blank fields (HTTP 400), rejection of null and non-object payloads (HTTP 400), malformed JSON syntax rejection (HTTP 400), invalid timestamp syntax rejection (HTTP 400), unsafe integer rejection (HTTP 400), strict duplicate JSON-key rejection at top level and nested payload (HTTP 400), declared oversized body rejection (HTTP 413), chunked oversized body rejection (HTTP 413), chain-head lock contention translation to HTTP 503 with `Retry-After: 1`, database error sanitization suppressing internal SQL/table/constraint details (HTTP 500), and unsupported media type rejection (HTTP 415).
+- **`AuditEventControllerIntegrationTests` (7 tests)**: Full HTTP-to-database integration tests against isolated Testcontainers PostgreSQL with random port and `TestRestTemplate`; tests cover genesis append creating sequence 1, consecutive appends chaining sequence 1 and 2 with offset timestamps normalized to UTC in PostgreSQL, 8-thread concurrent HTTP appends committing contiguous sequences 1..8 with unbroken cryptographic previous-hash links, oversized requests (> 1 MiB) rejected with HTTP 413 without database insertion or head advancement, validation failure rejected with HTTP 400 without database insertion or head advancement, and duplicate keys at root and nested payload rejected with HTTP 400.
+- **Previous baseline tests (63 tests)**: `AuditHashServiceTest` (29 tests), `AuditAppendServiceIntegrationTests` (18 tests), `FlywayMigrationIntegrationTests` (15 tests), and `AuditLogServiceApplicationTests` (1 test) continue to pass without regression.
+
+### Live isolated database smoke-test results (2026-10-15)
+
+The service was launched against an isolated PostgreSQL 16 container (`audit-log-service-postgres-1`) mapped to `127.0.0.1:5433` to coexist with host services on port 5432:
+
+- **Flyway migrations**: Automatically applied `V1__create_audit_chain_schema.sql` and `V2__enforce_chain_head_event_linkage.sql` as `audit_migrator` during Spring Boot application context startup under profile `local`.
+- **Live HTTP 201 append**: Submitted valid event via `curl`; received HTTP 201 with `sequenceNo: 1`, genesis `previousHash`, and valid SHA-256 hashes. Database verified: exactly 1 row in `audit_event` and `audit_chain_head.last_sequence_no = 1`.
+- **Live HTTP 400 validation**: Submitted JSON with duplicate key (`"eventType"`); received HTTP 400 with sanitized message `"Duplicate JSON property: 'eventType'"`. Submitted malformed JSON; received HTTP 400 with `"Malformed JSON request body"`.
+- **Live HTTP 413 payload limit**: Submitted a 1.1 MiB payload; received HTTP 413 with `"Request payload exceeds maximum allowed size of 1048576 bytes"`.
+- **Database integrity check**: Verified `audit_event` count remained exactly 1 and `audit_chain_head.last_sequence_no` remained 1. Rejected requests did not insert records or advance the chain head.
+- **Log privacy check**: Verified application logs contain only `eventId`, `sequenceNo`, and request `correlationId`; no `actorId`, `resourceId`, or `payload` data was logged.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
 2. [x] Implement PostgreSQL schema and V1/V2 migration foundations. (Milestone 3)
 3. [x] Implement canonicalization and hash components with fixed test vectors. (Milestone 4)
 4. [x] Implement transactional append with chain-head locking and persistence tests. (Milestone 4)
-5. [ ] Implement the event creation REST API (`POST /audit/events`) and validation tests.
+5. [x] Implement the event creation REST API (`POST /audit/events`) and validation tests. (Milestone 5)
 6. [ ] Implement filtered query API (`GET /audit/events`) and stable pagination.
 7. [ ] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests.
 8. [ ] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests.

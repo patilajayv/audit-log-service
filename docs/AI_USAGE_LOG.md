@@ -57,3 +57,36 @@ This log records AI-assisted work honestly. Each future entry will identify the 
     - Full Maven suite: 63 tests run, 0 failures, 0 errors, 0 skipped.
   - `git diff --check` passed with 0 errors.
   - Independent verification: Expected hash constants in tests were independently verified using RFC 8785 reference values and external SHA-256 tools, avoiding self-referential oracles.
+
+## 2026-10-15 - Milestone 5 REST API for audit event append
+
+- **Task:** Expose audit event append functionality through `POST /audit/events`, enforce 1 MiB body size limit, duplicate JSON-key detection, error sanitization, timestamp normalization, and local isolated PostgreSQL 16 verification.
+- **AI contribution:**
+  - Implemented `AuditEventController`, mapping incoming `AppendEventRequest` to `AuditAppendService.append(request)` and returning `201 Created` with `AuditEventResponse`.
+  - Implemented `RequestBodySizeLimitFilter` enforcing a 1 MiB threshold for declared `Content-Length` and chunked/streaming requests before deserialization, returning sanitized HTTP 413.
+  - Configured Jackson `JsonParser.Feature.STRICT_DUPLICATE_DETECTION` to reject duplicate keys at both root request and nested payload levels per RFC 8785 §3.2.3.
+  - Implemented `AuditControllerAdvice` providing sanitized error responses (`ErrorResponse`) for client errors (400), payload size (413), unsupported media types (415), chain-head lock contention (503 with `Retry-After: 1`), and database errors (500), suppressing internal SQL, constraint names, and stack traces.
+  - Added operational logging privacy omitting `actorId`, `resourceId`, and event payloads, tracing via correlation IDs.
+  - Created 18 MockMvc unit tests in `AuditEventControllerWebMvcTest` and 7 Testcontainers integration tests in `AuditEventControllerIntegrationTests`.
+  - Configured local-only Compose port override (`127.0.0.1:5433:5432`) to isolate development container from native host PostgreSQL 14 on port 5432.
+- **Engineer oversight:**
+  - Rejected Tomcat multipart/servlet configuration in favor of servlet filter with stream-counting logic for pure JSON bodies.
+  - Mandated strict duplicate-key detection at both root and nested payload levels.
+  - Required error response sanitization without SQL or stack trace disclosure.
+  - Mandated operational logging privacy (no actor IDs, resource IDs, or payloads logged).
+  - Enforced isolation from native PostgreSQL 14 without stopping host services.
+  - Reviewed pre-commit audit and approved local commit `53d5bcb`.
+- **Decision:** Approved by the engineer. Committed locally as `53d5bcb` with message `feat: implement audit event append REST endpoint` (local commit; unpushed to `origin`).
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditEventControllerWebMvcTest`: 18 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditEventControllerIntegrationTests`: 7 tests run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 88 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.
+  - Live isolated database smoke testing against PostgreSQL 16 on `127.0.0.1:5433`:
+    - Successful startup and Flyway `V1` and `V2` migration application under profile `local`.
+    - Live `POST /audit/events` append returned HTTP 201 with `sequenceNo: 1` and genesis `previousHash`; verified 1 row in `audit_event` and `audit_chain_head.last_sequence_no = 1`.
+    - Duplicate JSON key and malformed syntax returned HTTP 400.
+    - 1.1 MiB payload returned HTTP 413.
+    - Database verification confirmed rejected requests did not insert events or advance the chain head.
+    - Log verification confirmed absence of sensitive data leakage or unexpected exceptions.
