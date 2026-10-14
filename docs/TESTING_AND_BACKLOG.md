@@ -67,6 +67,33 @@ The full Maven test suite passed under Java 17.0.16 with **107 tests run, 0 fail
 - **`AuditQueryIntegrationTests` (10 tests)**: End-to-end HTTP-to-database integration tests against isolated Testcontainers PostgreSQL 16; tests cover empty database queries, 15-event multi-page deterministic pagination strictly monotonic by `sequence_no ASC` without duplicate or skipped events, exact `actorId` filtering, `resourceType` and `resourceId` independent and combined filtering, `eventType` filtering, `recorded_at` timestamp range filtering with inclusive boundaries, multi-criteria filter intersection, no-match empty page responses, read-only database invariant assertion (verifying event counts, sequence counters, and `audit_chain_head.last_sequence_no` and `last_record_hash` are completely unchanged), and HTTP validation error sanitization.
 - **Previous baseline tests (88 tests)**: `AuditEventControllerWebMvcTest` (18 tests), `AuditEventControllerIntegrationTests` (7 tests), `AuditHashServiceTest` (29 tests), `AuditAppendServiceIntegrationTests` (18 tests), `FlywayMigrationIntegrationTests` (15 tests), and `AuditLogServiceApplicationTests` (1 test) continue to pass without regression.
 
+## Milestone 7 validation status
+
+Milestone 7 implemented the complete-chain verification REST API (`GET /audit/verify`) backed by `AuditVerificationService`, performing cryptographic hash chain recomputation, sequence contiguity verification, genesis previous-hash check, RFC 8785 canonical content hash validation, record hash recomputation, and chain-head pointer validation using streaming cursors (`fetchSize = 500`) and immediate violation stoppage. Milestone 7 changes are currently uncommitted locally pending review.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **125 tests run, 0 failures, 0 errors, and 0 skipped**:
+
+- **`AuditEventVerifyControllerWebMvcTest` (3 tests)**: MockMvc slice tests covering intact chain responses (`200 OK` with `status: INTACT`), corrupted chain responses with structured violation details (`200 OK` with `status: CORRUPTED`), and correlation ID propagation.
+- **`AuditVerificationIntegrationTests` (15 tests)**: End-to-end HTTP-to-database integration tests against isolated Testcontainers PostgreSQL 16; tests cover:
+  - Empty database verification (intact, genesis hash, 0 verified records).
+  - Single-event chain verification (intact, sequence 1, matching head hash).
+  - 10-event multi-event chain verification (intact, unbroken chain pointers, matching head hash).
+  - Tamper test 1 (alter payload): detects `CONTENT_HASH_MISMATCH` at sequence 3.
+  - Tamper test 2 (alter stored content hash): detects `CONTENT_HASH_MISMATCH` at sequence 2.
+  - Tamper test 3 (alter genesis previous hash): detects `GENESIS_MISMATCH` at sequence 1.
+  - Tamper test 4 (alter middle previous hash): detects `PREVIOUS_HASH_MISMATCH` at sequence 3.
+  - Tamper test 5 (alter stored record hash): detects `RECORD_HASH_MISMATCH` at sequence 2.
+  - Tamper test 6 (delete middle event): detects `SEQUENCE_GAP` at sequence 2 (expected 2, found 3).
+  - Tamper test 7 (delete initial event): detects `SEQUENCE_GAP` at sequence 1 (expected 1, found 2).
+  - Tamper test 8 (delete trailing event): detects `CHAIN_HEAD_MISMATCH` at sequence 3 (head expects 3, verified 2).
+  - Tamper test 9 (alter chain head record hash): detects `CHAIN_HEAD_MISMATCH`.
+  - Tamper test 10 (alter chain head sequence number): detects `CHAIN_HEAD_MISMATCH`.
+  - Missing chain head row: detects `CHAIN_HEAD_MISMATCH` with missing head record diagnostic message.
+  - Read-only invariant check: asserts row counts and chain-head values are 100% unaltered after multiple verification calls.
+- **Previous baseline tests (107 tests)**: `AuditEventControllerWebMvcTest` (18 tests), `AuditEventControllerIntegrationTests` (7 tests), `AuditEventQueryControllerWebMvcTest` (9 tests), `AuditQueryIntegrationTests` (10 tests), `AuditHashServiceTest` (29 tests), `AuditAppendServiceIntegrationTests` (18 tests), `FlywayMigrationIntegrationTests` (15 tests), and `AuditLogServiceApplicationTests` (1 test) continue to pass without regression.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -75,7 +102,7 @@ The full Maven test suite passed under Java 17.0.16 with **107 tests run, 0 fail
 4. [x] Implement transactional append with chain-head locking and persistence tests. (Milestone 4)
 5. [x] Implement the event creation REST API (`POST /audit/events`) and validation tests. (Milestone 5)
 6. [x] Implement filtered query API (`GET /audit/events`) and stable pagination. (Milestone 6)
-7. [ ] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests.
+7. [x] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests. (Milestone 7)
 8. [ ] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests.
 9. [ ] Implement deferred Scenario B archive-metadata migration, archival workflow, redacted projections, and verifiable export (`GET /audit/exports`).
 10. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.

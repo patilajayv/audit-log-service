@@ -36,15 +36,20 @@ This document separates assignment requirements from engineering choices. "Requi
 - Pagination enforces validated bounds (`page >= 0`, `1 <= size <= 100`) and deterministic ordering by `sequence_no ASC`. Separate requests under PostgreSQL `READ COMMITTED` isolation do not share a transaction snapshot across pages, but already-committed records are deterministically ordered.
 - Query validation rejects blank filters, negative page numbers, invalid sizes, malformed timestamps, or `from > to` with sanitized HTTP 400 responses.
 - Queries execute under read-only transactions (`@Transactional(readOnly = true)`) and never mutate stored rows, sequence numbers, or the chain head.
+- Verification API (`GET /audit/verify`) executes in `@Transactional(readOnly = true)` using cursor-based streaming (`fetchSize = 500`) to avoid loading large datasets into memory, stopping immediately at the first inconsistency.
+- Verification response cleanly separates declared chain-head metadata from verified values (`recordsVerified`, `headSequenceNo`, `headRecordHash`, `lastVerifiedSequenceNo`, `lastVerifiedRecordHash`, `violation`).
+- Missing or malformed singleton `audit_chain_head` row is reported as a structured `CHAIN_HEAD_MISMATCH` inconsistency rather than a generic database exception.
+- Verification detects corruption and tampering relative to the local stored chain and head; detecting complete history rewriting by a superuser requires an external trusted anchor.
 
 ### Acceptance criteria
 
 - A valid event is appended via `POST /audit/events`, returning `201 Created` with monotonic sequence, assigned UUID, hashes, and previous hash.
 - Oversized (> 1 MiB), duplicate-key, or malformed requests are rejected without inserting rows or advancing the chain head.
 - All documented filter combinations return the expected stable pages ordered deterministically by `sequence_no ASC`.
-- Query execution is strictly read-only and leaves row counts, sequence numbers, and `audit_chain_head` unaltered.
+- Query and verification execution are strictly read-only and leave row counts, sequence numbers, and `audit_chain_head` unaltered.
 - Invalid query parameters return sanitized HTTP 400 responses without disclosing internal errors or stack traces.
-- Direct changes to payloads, hashes, links, or row presence cause `/audit/verify` to report the first detectable violation.
+- `GET /audit/verify` returns `200 OK` with `status: "INTACT"` for empty and valid chains.
+- Direct modifications to stored payloads, content hashes, genesis hash, previous-hash links, record hashes, deleted events (first, middle, trailing), or altered chain-head state cause `/audit/verify` to return `200 OK` with `status: "CORRUPTED"` and the exact violation type and sequence.
 
 ## Scenario B: Retention, Redaction, and Export
 

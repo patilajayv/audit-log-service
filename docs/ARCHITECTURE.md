@@ -130,9 +130,37 @@ The `AuditQueryService` provides read-only querying of committed audit events vi
 
 ### Verification behavior
 
-Verification reads rows by `sequence_no` and stops at the first error. It checks genesis use, contiguous sequence numbers, recomputed content hashes, recomputed record hashes, and previous-link equality. It finally compares the last scanned row to `audit_chain_head`.
+The `AuditVerificationService` exposes complete-chain verification via `GET /audit/verify`:
 
-Violation types include `GENESIS_MISMATCH`, `SEQUENCE_GAP`, `CONTENT_HASH_MISMATCH`, `PREVIOUS_HASH_MISMATCH`, `RECORD_HASH_MISMATCH`, and `CHAIN_HEAD_MISMATCH`. This detects altered payloads, altered stored hashes, broken links, reordered rows, deleted middle rows, and deleted final rows when the local chain head remains unchanged.
+1. **Algorithm and checks**:
+   - Reads the singleton `audit_chain_head` row (`chain_id = 1`).
+   - If `audit_chain_head` is missing, reports `CHAIN_HEAD_MISMATCH` with diagnostic details rather than a generic database error.
+   - For an empty chain (`last_sequence_no = 0`), confirms genesis hash and verifies that zero rows exist in `audit_event`.
+   - For non-empty chains, streams records ordered by `sequence_no ASC` using PostgreSQL cursor-based streaming (`fetchSize = 500`) inside a read-only transaction (`@Transactional(readOnly = true)`).
+   - Validates sequence contiguity (`sequence_no = expected_sequence`), genesis previous-hash (`sequence 1` uses 64 all-zero genesis hash), previous-hash linkage (`sequence N` points to record hash of `sequence N-1`), recomputes RFC 8785 canonical content hash, recomputes domain-separated record hash, and stops immediately upon the first violation.
+   - Compares the final verified record sequence and record hash against the declared `audit_chain_head` state.
+
+2. **Response semantics**:
+   - Returns HTTP 200 OK with `AuditVerificationResponse` distinguishing stored chain-head metadata from verified values:
+     - `status`: `"INTACT"` or `"CORRUPTED"`.
+     - `recordsVerified`: number of records sequentially scanned and cryptographically validated.
+     - `headSequenceNo`: sequence number stored in `audit_chain_head` (null if head row missing).
+     - `headRecordHash`: record hash stored in `audit_chain_head` (null if head row missing).
+     - `lastVerifiedSequenceNo`: sequence number of the last successfully verified record (0 for empty chain).
+     - `lastVerifiedRecordHash`: record hash of the last successfully verified record (genesis for empty chain).
+     - `violation`: structured `ChainViolation` object detailing `type`, `sequenceNo`, `eventId`, `expected`, `actual`, and sanitized `message` (null if intact).
+
+3. **Violation categories**:
+   - `GENESIS_MISMATCH`: First event does not use the 64-character all-zero genesis hash.
+   - `SEQUENCE_GAP`: Sequence numbers are non-contiguous or do not start at 1 (detects missing intermediate rows, missing initial row, or reordered rows).
+   - `CONTENT_HASH_MISMATCH`: Stored `content_hash` does not match recomputed RFC 8785 canonical content hash (detects modified payloads or metadata).
+   - `PREVIOUS_HASH_MISMATCH`: Event `previous_hash` does not match the preceding event's `record_hash` (detects broken hash pointers).
+   - `RECORD_HASH_MISMATCH`: Stored `record_hash` does not match recomputed record hash.
+   - `CHAIN_HEAD_MISMATCH`: Missing `audit_chain_head` row, or head sequence/hash does not match the tail of the verified event chain (detects trailing truncation or phantom head updates).
+
+4. **Trust and security boundary**:
+   - Verification reliably detects accidental corruption, administrative tampering, sequence gaps, payload alterations, and tail deletions relative to the stored database records and chain-head pointer.
+   - *Security limitation*: Verification relies on the local database's chain head as the local trust anchor. An attacker possessing full administrative access who rewrites the entire chain from genesis and recalculates valid hashes and a matching chain head cannot be detected by internal database verification alone without an independently trusted external anchor (such as signed external checkpoints, witness logs, or external timestamping).
 
 ## Append-only controls
 
