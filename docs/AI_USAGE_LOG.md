@@ -90,3 +90,28 @@ This log records AI-assisted work honestly. Each future entry will identify the 
     - 1.1 MiB payload returned HTTP 413.
     - Database verification confirmed rejected requests did not insert events or advance the chain head.
     - Log verification confirmed absence of sensitive data leakage or unexpected exceptions.
+
+## 2026-10-15 - Milestone 6 query API and pagination
+
+- **Task:** Implement read-only `GET /audit/events` query REST API with multi-criteria filtering, stable pagination, input validation, and read-only verification.
+- **AI contribution:**
+  - Implemented `AuditEventDto` representing all 13 stored database columns with immutable types and formatted ISO-8601 UTC timestamps.
+  - Implemented `AuditPageResponse<T>` containing events list and pagination metadata (`page`, `size`, `totalElements`, `totalPages`, `first`, `last`).
+  - Implemented `AuditQueryCriteria` with strict validation: `page >= 0`, `1 <= size <= 100`, non-blank filter strings, ISO-8601 UTC parsing on `from` and `to`, and `from <= to` check.
+  - Implemented `AuditQueryService` using Spring `JdbcTemplate` with `@Transactional(readOnly = true)`. Used 100% parameterized SQL for count and select queries with `ORDER BY sequence_no ASC LIMIT ? OFFSET ?`.
+  - Updated `AuditEventController` to expose `GET /audit/events`, delegating to `AuditQueryService`.
+  - Updated `AuditControllerAdvice` with `MethodArgumentTypeMismatchException` handler returning sanitized HTTP 400 for query parameter conversion errors.
+  - Created 9 MockMvc slice tests in `AuditEventQueryControllerWebMvcTest` and 10 end-to-end integration tests against Testcontainers PostgreSQL 16 in `AuditQueryIntegrationTests`.
+- **Engineer oversight:**
+  - Clarified consistency model: corrected documentation to state that separate requests under PostgreSQL `READ COMMITTED` isolation do not share a transaction snapshot across pages, while `sequence_no ASC` provides deterministic ordering for already-committed rows.
+  - Mandated 100% parameterized SQL for all filter criteria; required count and select queries to apply identical filter predicates.
+  - Mandated operational logging privacy (no actor IDs, resource IDs, or payloads logged).
+  - Enforced verification that query execution never mutates database rows, sequences, or `audit_chain_head`.
+  - Required tests covering filter combinations, timestamp boundaries, invalid parameters, page boundaries, stable ordering, and read-only behavior.
+- **Decision:** Pending engineer review. Milestone 6 changes uncommitted locally.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditEventQueryControllerWebMvcTest`: 9 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditQueryIntegrationTests`: 10 tests run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 107 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.

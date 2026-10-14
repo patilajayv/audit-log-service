@@ -55,6 +55,18 @@ The service was launched against an isolated PostgreSQL 16 container (`audit-log
 - **Database integrity check**: Verified `audit_event` count remained exactly 1 and `audit_chain_head.last_sequence_no` remained 1. Rejected requests did not insert records or advance the chain head.
 - **Log privacy check**: Verified application logs contain only `eventId`, `sequenceNo`, and request `correlationId`; no `actorId`, `resourceId`, or `payload` data was logged.
 
+## Milestone 6 validation status
+
+Milestone 6 implemented the read-only audit event query REST API (`GET /audit/events`) backed by `AuditQueryService`, supporting multi-criteria filtering (`actorId`, `resourceType`, `resourceId`, `eventType`, and ISO-8601 UTC time range on `recorded_at`), validated pagination limits (`page >= 0`, `1 <= size <= 100`), deterministic ordering by `sequence_no ASC`, parameterized SQL queries, sanitized error responses, and operational log privacy. Milestone 6 changes are currently uncommitted locally pending review.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **107 tests run, 0 failures, 0 errors, and 0 skipped**:
+
+- **`AuditEventQueryControllerWebMvcTest` (9 tests)**: MockMvc slice tests covering default pagination (`page=0, size=20`), complete filter binding, response DTO schema structure, HTTP 400 for negative page index, HTTP 400 for size < 1, HTTP 400 for size > 100, HTTP 400 for blank filter parameters, HTTP 400 for malformed ISO-8601 timestamps, HTTP 400 for `from > to` inverted time bounds, and HTTP 400 for non-integer query parameter type mismatches.
+- **`AuditQueryIntegrationTests` (10 tests)**: End-to-end HTTP-to-database integration tests against isolated Testcontainers PostgreSQL 16; tests cover empty database queries, 15-event multi-page deterministic pagination strictly monotonic by `sequence_no ASC` without duplicate or skipped events, exact `actorId` filtering, `resourceType` and `resourceId` independent and combined filtering, `eventType` filtering, `recorded_at` timestamp range filtering with inclusive boundaries, multi-criteria filter intersection, no-match empty page responses, read-only database invariant assertion (verifying event counts, sequence counters, and `audit_chain_head.last_sequence_no` and `last_record_hash` are completely unchanged), and HTTP validation error sanitization.
+- **Previous baseline tests (88 tests)**: `AuditEventControllerWebMvcTest` (18 tests), `AuditEventControllerIntegrationTests` (7 tests), `AuditHashServiceTest` (29 tests), `AuditAppendServiceIntegrationTests` (18 tests), `FlywayMigrationIntegrationTests` (15 tests), and `AuditLogServiceApplicationTests` (1 test) continue to pass without regression.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -62,7 +74,7 @@ The service was launched against an isolated PostgreSQL 16 container (`audit-log
 3. [x] Implement canonicalization and hash components with fixed test vectors. (Milestone 4)
 4. [x] Implement transactional append with chain-head locking and persistence tests. (Milestone 4)
 5. [x] Implement the event creation REST API (`POST /audit/events`) and validation tests. (Milestone 5)
-6. [ ] Implement filtered query API (`GET /audit/events`) and stable pagination.
+6. [x] Implement filtered query API (`GET /audit/events`) and stable pagination. (Milestone 6)
 7. [ ] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests.
 8. [ ] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests.
 9. [ ] Implement deferred Scenario B archive-metadata migration, archival workflow, redacted projections, and verifiable export (`GET /audit/exports`).

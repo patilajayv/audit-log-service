@@ -4,9 +4,9 @@ This repository contains a Java 17 and Spring Boot 3 prototype for the Audit Log
 
 ## Current milestone
 
-Milestone 5 is implemented and committed locally as `53d5bcb` (unpushed to `origin`). The application exposes the `POST /audit/events` REST API backed by `AuditAppendService`, enforcing a 1 MiB request body size limit on declared and chunked streams (HTTP 413), strict duplicate JSON-key rejection (HTTP 400), timestamp normalization to UTC milliseconds, and sanitized error handling without database or stack trace disclosure. Isolated local PostgreSQL 16 smoke tests have passed on `127.0.0.1:5433`.
+Milestone 6 is implemented (changes uncommitted locally pending review). The application exposes the read-only query REST API (`GET /audit/events`) backed by `AuditQueryService`, supporting multi-criteria filtering (`actorId`, `resourceType`, `resourceId`, `eventType`, and ISO-8601 UTC time range on `recorded_at`), validated pagination limits (`page >= 0`, `1 <= size <= 100`), deterministic monotonic ordering by `sequence_no ASC`, sanitized error responses, and operational log privacy. Milestone 5 (`POST /audit/events`) is committed locally as `53d5bcb`.
 
-Subsequent milestones will add the query/verification controllers (`GET /audit/events`, `GET /audit/verify`), Spring Security role authorization (`AUDIT_WRITER`, `AUDITOR`), Scenario B archival and redaction workflows, and verifiable export bundles.
+Subsequent milestones will add the chain verification endpoint (`GET /audit/verify`), Spring Security role authorization (`AUDIT_WRITER`, `AUDITOR`), Scenario B archival and redaction workflows, and verifiable export bundles.
 
 ## Prerequisites
 
@@ -18,13 +18,13 @@ The test suite runs against Java 17. Use a Java 17 JDK when validating this proj
 
 ## Build and test
 
-Run the full suite of 88 unit and integration tests:
+Run the full suite of 107 unit and integration tests:
 
 ```bash
 mvn test
 ```
 
-The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 15 database migration tests, 1 application context test, 18 WebMvc controller slice tests, and 7 end-to-end HTTP/database integration tests.
+The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 15 database migration tests, 1 application context test, 18 append WebMvc controller slice tests, 7 append end-to-end HTTP/database integration tests, 9 query WebMvc controller slice tests, and 10 query end-to-end HTTP/database integration tests.
 
 ## Local PostgreSQL
 

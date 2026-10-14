@@ -15,6 +15,7 @@ import com.example.auditlog.append.AppendEventRequest;
 import com.example.auditlog.append.AppendEventResult;
 import com.example.auditlog.append.AuditAppendService;
 import com.example.auditlog.hashing.AuditHashService;
+import com.example.auditlog.query.AuditQueryService;
 import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,6 +51,9 @@ class AuditEventControllerWebMvcTest {
 
     @MockBean
     private AuditAppendService appendService;
+
+    @MockBean
+    private AuditQueryService queryService;
 
     @BeforeEach
     void setUp() {

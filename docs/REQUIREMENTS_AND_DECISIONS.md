@@ -31,12 +31,19 @@ This document separates assignment requirements from engineering choices. "Requi
 - Strict duplicate-key detection is enforced globally across root request properties and nested payload objects (RFC 8785 §3.2.3), returning HTTP 400.
 - Handled errors return sanitized responses without disclosing SQL syntax, table names, constraint details, or stack traces, while unexpected exceptions receive a generic HTTP 500 response. Transient lock contention (SQLState `55P03`) returns HTTP 503 with `Retry-After: 1`.
 - Operational logging omits `actorId`, `resourceId`, and event `payload`; requests are traced via correlation IDs.
+- Query API (`GET /audit/events`) uses 100% parameterized SQL for all filter criteria (`actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`), applying identical filters to both count and data queries.
+- Time range filtering operates on service-assigned `recorded_at` using ISO-8601 UTC timestamps, with inclusive bounds `[from, to]`.
+- Pagination enforces validated bounds (`page >= 0`, `1 <= size <= 100`) and deterministic ordering by `sequence_no ASC`. Separate requests under PostgreSQL `READ COMMITTED` isolation do not share a transaction snapshot across pages, but already-committed records are deterministically ordered.
+- Query validation rejects blank filters, negative page numbers, invalid sizes, malformed timestamps, or `from > to` with sanitized HTTP 400 responses.
+- Queries execute under read-only transactions (`@Transactional(readOnly = true)`) and never mutate stored rows, sequence numbers, or the chain head.
 
 ### Acceptance criteria
 
 - A valid event is appended via `POST /audit/events`, returning `201 Created` with monotonic sequence, assigned UUID, hashes, and previous hash.
 - Oversized (> 1 MiB), duplicate-key, or malformed requests are rejected without inserting rows or advancing the chain head.
-- All documented filter combinations return the expected stable pages.
+- All documented filter combinations return the expected stable pages ordered deterministically by `sequence_no ASC`.
+- Query execution is strictly read-only and leaves row counts, sequence numbers, and `audit_chain_head` unaltered.
+- Invalid query parameters return sanitized HTTP 400 responses without disclosing internal errors or stack traces.
 - Direct changes to payloads, hashes, links, or row presence cause `/audit/verify` to report the first detectable violation.
 
 ## Scenario B: Retention, Redaction, and Export

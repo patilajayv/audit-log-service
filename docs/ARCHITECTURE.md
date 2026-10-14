@@ -118,6 +118,16 @@ Database triggers provide defense in depth for the same ordering. The insert tri
 
 The chain-head linkage protection is delivered as a forward-only Flyway `V2` migration. Fresh databases apply `V1` followed by `V2`; databases that already recorded `V1` retain their migration history and receive `V2` on the next Flyway run.
 
+### Query API and pagination
+
+The `AuditQueryService` provides read-only querying of committed audit events via `GET /audit/events`:
+
+1. **Filtering**: Supports filtering by any combination of `actorId`, `resourceType`, `resourceId`, `eventType`, and time range (`from` and `to` against service-assigned `recorded_at`). All user-supplied criteria are bound strictly using parameterized SQL placeholders (`?`) across both count and data queries.
+2. **Pagination and ordering**: Pagination parameters (`page` with default 0, `size` with default 20, max 100) are validated. Queries execute with `ORDER BY sequence_no ASC LIMIT ? OFFSET ?`, guaranteeing deterministic, monotonic ordering by sequence number.
+3. **Consistency model**: Under PostgreSQL's default `READ COMMITTED` transaction isolation, each HTTP request executes in its own independent database transaction. Ordering by `sequence_no ASC` provides deterministic results for already-committed events. However, separate HTTP requests do not share a database transaction snapshot across pages; concurrent appends committed between page requests will increment `totalElements` and advance the chain head without altering the ordering of already-committed sequences.
+4. **Read-only enforcement**: The service operates under `@Transactional(readOnly = true)`. Queries never insert, update, or delete rows, and never advance sequence numbers or the chain head.
+5. **Privacy and security**: Request logging records only correlation IDs; sensitive query parameters (e.g., `actorId`, `resourceId`) and audit event payloads are never logged. Authentication and role-based access control (`AUDITOR` role) are operational requirements for production deployment and are scheduled for Milestone 8.
+
 ### Verification behavior
 
 Verification reads rows by `sequence_no` and stops at the first error. It checks genesis use, contiguous sequence numbers, recomputed content hashes, recomputed record hashes, and previous-link equality. It finally compares the last scanned row to `audit_chain_head`.
