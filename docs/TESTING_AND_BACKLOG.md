@@ -21,19 +21,30 @@ Manual validation against an isolated disposable PostgreSQL database confirmed F
 
 On 2026-10-15, Java 17.0.16 ran the five focused V2 migration tests successfully (0 failures, 0 errors, 0 skipped), then the full Maven suite successfully (16 tests: 1 application-context test and 15 PostgreSQL integration tests; 0 failures, 0 errors, 0 skipped). The V2 migration tests cover a valid genesis chain and four malformed V1 states; the failing migrations preserve the existing event/head data and do not leave V2-only triggers/functions or a successful V2 history entry. The integration tests use a Flyway-clean schema in a dedicated Testcontainers PostgreSQL instance rather than the separately used validation databases or containers. The suite includes direct database-level concurrent transaction contention coverage; application-level concurrent appends, the append API, and the full end-to-end audit workflow remain unverified. Synthetic repeated-character hashes do not establish cryptographic hash correctness.
 
+## Milestone 4 validation status
+
+Milestone 4 completed RFC 8785 (JCS) canonical hashing and the transactional `AuditAppendService` backed by PostgreSQL chain-head row locking.
+
+The full Maven test suite passed under Java 17.0.16 with **63 tests run, 0 failures, 0 errors, and 0 skipped**:
+
+- **`AuditHashServiceTest` (29 tests)**: Verified against independent hardcoded test vectors calculated with external oracles; tests cover negative zero normalization, integer-valued float normalization without decimals, scientific notation, subnormal IEEE-754 values, safe integer boundaries $[-(2^{53}-1), 2^{53}-1]$, rejection of unsafe integers (`Long.MAX_VALUE`, `Long.MIN_VALUE`, `BigInteger`), rejection of non-finite floats (`NaN`, `Infinity`), string encoding preservation for large numbers, decimal ECMAScript binary64 formatting, and duplicate property rejection.
+- **`AuditAppendServiceIntegrationTests` (18 tests)**: Verified against dedicated, isolated Testcontainers PostgreSQL instances; tests cover appending the first event from genesis, chaining a second event to the first record hash, deterministic content and record hash matching, atomic rollback on head-advancement failure via deferred constraint triggers, invalid request validation (null/blank fields, non-object payload), and serialized concurrent appends producing distinct contiguous sequences without gaps or collisions.
+- **`FlywayMigrationIntegrationTests` (15 tests)**: Confirms V1/V2 migration baseline, trigger protections, and rollback on malformed existing state.
+- **`AuditLogServiceApplicationTests` (1 test)**: Confirms Spring Boot application context loads cleanly with configured mock dependencies.
+
 ## Prioritized backlog
 
-1. Add detailed requirements, architecture, threat model, and acceptance criteria documentation.
-2. Implement the deferred Scenario B archive-metadata migration and archival workflow.
-3. Implement canonicalization and hash components with fixed test vectors.
-4. Implement transactional append with chain-head locking and persistence tests.
-5. Implement the event creation API and validation tests.
-6. Implement filtered query and stable pagination.
-7. Implement complete-chain verification and direct-database tampering tests.
-8. Add Spring Security, role authorization, and security tests.
-9. Implement bounded Scenario B archival, redacted projections, and verifiable export.
-10. Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
-11. Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
+1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
+2. [x] Implement PostgreSQL schema and V1/V2 migration foundations. (Milestone 3)
+3. [x] Implement canonicalization and hash components with fixed test vectors. (Milestone 4)
+4. [x] Implement transactional append with chain-head locking and persistence tests. (Milestone 4)
+5. [ ] Implement the event creation REST API (`POST /audit/events`) and validation tests.
+6. [ ] Implement filtered query API (`GET /audit/events`) and stable pagination.
+7. [ ] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests.
+8. [ ] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests.
+9. [ ] Implement deferred Scenario B archive-metadata migration, archival workflow, redacted projections, and verifiable export (`GET /audit/exports`).
+10. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
+11. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
 
 ## Milestone discipline
 

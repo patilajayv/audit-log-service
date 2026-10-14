@@ -4,21 +4,27 @@ This repository contains a Java 17 and Spring Boot 3 prototype for the Audit Log
 
 ## Current milestone
 
-The project foundation provides a minimal Spring Boot application, a context-load test, local PostgreSQL configuration, and Flyway database migrations. Audit event APIs, hashing, and security are added in later milestones.
+Milestone 4 is complete. The application layer provides deterministic RFC 8785 (JCS) canonical JSON hashing (`content_hash`), 4-byte big-endian length-prefixed domain-separated chain linking (`record_hash`), and a transactional `AuditAppendService` that locks `audit_chain_head` (`SELECT ... FOR UPDATE`), assigns monotonic sequences, inserts events, and advances the chain head atomically.
+
+Subsequent milestones will add the REST write/query/verification controllers, Spring Security role authorization, Scenario B archival and redaction workflows, and verifiable export bundles.
 
 ## Prerequisites
 
-- Java 17 JDK for development and final validation
+- Java 17 JDK for development and validation
 - Maven 3.9 or later
-- Docker Desktop with Docker Compose
+- Docker Desktop or compatible container runtime for Testcontainers and Compose
 
-The latest Maven test run on this workstation used Java 17.0.16. Other developer workstations may use different Java runtimes; use a Java 17 JDK when validating this project.
+The test suite runs against Java 17. Use a Java 17 JDK when validating this project.
 
 ## Build and test
+
+Run the full suite of 63 unit and integration tests:
 
 ```bash
 mvn test
 ```
+
+The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 15 database migration tests, and 1 application context test.
 
 ## Local PostgreSQL
 

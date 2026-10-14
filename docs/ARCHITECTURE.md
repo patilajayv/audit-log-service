@@ -51,39 +51,59 @@ Scenario B metadata keyed by `event_id`, containing archival time, policy refere
 
 ### Canonical event content
 
-`content_hash` is `SHA-256` of UTF-8 RFC 8785 JSON Canonicalization Scheme content with this exact shape:
+`content_hash` is `SHA-256` of UTF-8 RFC 8785 JSON Canonicalization Scheme (JCS) content with this exact shape:
 
 ```json
 {
-  "canonicalizationVersion": "JCS-1",
-  "eventId": "uuid",
-  "eventType": "USER_LOGIN",
   "actorId": "actor-123",
-  "resourceType": "ACCOUNT",
-  "resourceId": "account-456",
+  "canonicalizationVersion": "JCS-1",
+  "eventId": "00000000-0000-0000-0000-000000000001",
+  "eventType": "USER_LOGIN",
   "payload": { "canonical": "json" },
-  "sourceTimestamp": "2026-10-14T15:00:00.123Z",
-  "recordedAt": "2026-10-14T15:00:01.456Z"
+  "recordedAt": "2026-10-14T15:00:01.456Z",
+  "resourceId": "account-456",
+  "resourceType": "ACCOUNT",
+  "sourceTimestamp": "2026-10-14T15:00:00.123Z"
 }
 ```
 
-Optional `sourceTimestamp` is represented as JSON `null` when absent. Timestamps use UTC and millisecond precision. Objects sort keys, arrays retain order, strings use UTF-8, and numbers follow JCS normalization. The service hashes parsed payload values, never raw request text.
+Top-level object keys are sorted lexicographically by UTF-16 code units per RFC 8785 §3.2.3. Canonicalization is performed using `io.github.erdtman:java-json-canonicalization:1.1`, which implements ECMAScript 6 §7.1.12.1 number serialization, -0.0 normalization to 0, integer-valued float normalization without decimal points, scientific notation, and control-character escaping (`\\u00xx`).
 
-The first event uses the 64-character lowercase-zero genesis hash. Each `record_hash` is SHA-256 over length-prefixed UTF-8 components in this order: `AUDIT_RECORD_V1`, `sequence_no`, `previous_hash`, and `content_hash`. Length prefixes remove field-boundary ambiguity.
+Optional `sourceTimestamp` is represented as JSON `null` when absent. All timestamps use UTC with millisecond precision (`yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`) and are truncated to milliseconds (`ChronoUnit.MILLIS`) upon request ingestion.
+
+#### Numeric policy (RFC 8785 Appendix D & RFC 7493 §2.2)
+
+- **Safe integers**: Integers within $[-(2^{53} - 1), 2^{53} - 1]$ ($[-9007199254740991, 9007199254740991]$) are serialized as exact JSON numbers without precision loss.
+- **Unsafe integers**: Integers outside this range (including signed 64-bit boundaries like `Long.MAX_VALUE`, `Long.MIN_VALUE`, and arbitrary-precision `BigInteger`) are rejected with `IllegalArgumentException` to prevent silent IEEE-754 precision loss.
+- **Exact large values**: Callers requiring exact representation of 64-bit integers or arbitrary decimals must encode them as JSON strings.
+- **Non-finite numbers**: `NaN`, `Infinity`, and overflowing decimals are rejected.
+- **Duplicate keys**: Rejected by both `JsonCanonicalizer` (`IOException`) and Jackson `ObjectMapper` strict duplicate detection.
+
+#### Record hash
+
+The first event uses the 64-character lowercase-zero genesis hash. Each `record_hash` is SHA-256 over four length-prefixed UTF-8 components in this exact order:
+
+1. `AUDIT_RECORD_V1` (domain separator)
+2. `sequence_no` (decimal string, e.g. `"1"`)
+3. `previous_hash` (64-character lowercase hex)
+4. `content_hash` (64-character lowercase hex)
+
+Each component is prefixed by its 4-byte big-endian unsigned length in bytes, eliminating any field-boundary ambiguity.
 
 ### Append transaction and concurrency
 
-The append service runs one transaction:
+The `AuditAppendService` runs one transaction:
 
-1. Lock the singleton chain-head row with `SELECT ... FOR UPDATE`.
-2. Derive the next sequence and previous hash.
-3. Canonicalize and hash the event, then insert it.
-4. Update the chain-head row with the new sequence and record hash.
-5. Commit both writes together.
+1. Lock the singleton chain-head row with `SELECT last_sequence_no, last_record_hash FROM audit_chain_head WHERE chain_id = 1 FOR UPDATE`.
+2. Derive the next sequence (`last_sequence_no + 1`) and previous hash (`last_record_hash`).
+3. Truncate timestamps to milliseconds, canonicalize event content per RFC 8785, and compute `content_hash` and `record_hash`.
+4. Insert the new event into `audit_event`.
+5. Update `audit_chain_head` with the new sequence and record hash.
+6. Commit both writes together.
 
-The head-row lock serializes writers. A failed insert, hash computation, or head update rolls back the whole transaction. This limits write throughput but is a clear and correct prototype trade-off.
+The head-row lock serializes concurrent writers. A failed insert, hash computation, or head update rolls back the whole transaction. Application-level concurrency has been verified in integration tests (`concurrentAppendsProduceTwoSequentialEventsWithNoGaps()`): concurrent appends serialize on the row lock and commit distinct contiguous sequence numbers without gaps or duplicate sequences.
 
-Database triggers provide defense in depth for the same ordering. The insert trigger locks the chain head and accepts only the next sequence with the current head hash as `previous_hash`. The head-update trigger then requires that inserted event to have the new head sequence and hash. A deferred constraint trigger rejects a transaction that inserts an event without advancing the head to it. The service still takes the lock explicitly before calculating hashes; application-level concurrency has not yet been integration-tested.
+Database triggers provide defense in depth for the same ordering. The insert trigger locks the chain head and accepts only the next sequence with the current head hash as `previous_hash`. The head-update trigger then requires that inserted event to have the new head sequence and hash. A deferred constraint trigger rejects a transaction that inserts an event without advancing the head to it.
 
 The chain-head linkage protection is delivered as a forward-only Flyway `V2` migration. Fresh databases apply `V1` followed by `V2`; databases that already recorded `V1` retain their migration history and receive `V2` on the next Flyway run.
 

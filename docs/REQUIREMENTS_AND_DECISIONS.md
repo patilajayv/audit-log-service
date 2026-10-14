@@ -23,6 +23,10 @@ This document separates assignment requirements from engineering choices. "Requi
 
 - A single global chain is sufficient for the prototype. Its sequence defines the authoritative audit order.
 - The service returns stable sequence-order pagination. Timestamp order is a query concern, not chain order.
+- Canonical JSON follows RFC 8785 (JCS) via `java-json-canonicalization:1.1`. The canonical object covers nine fields: `actorId`, `canonicalizationVersion` (`JCS-1`), `eventId`, `eventType`, `payload`, `recordedAt`, `resourceId`, `resourceType`, and `sourceTimestamp`.
+- Numeric limits follow RFC 8785 Appendix D and RFC 7493 (I-JSON §2.2): Integers in the safe IEEE-754 range [-(2^53 - 1), 2^53 - 1] serialize as numbers; integers outside this range and non-finite floats are actively rejected. Exact 64-bit or arbitrary-precision values must be encoded as JSON strings. Duplicate object keys are rejected.
+- Timestamps (`recordedAt` and optional `sourceTimestamp`) are normalized to UTC milliseconds (`ChronoUnit.MILLIS`) upon assignment/ingestion.
+- `record_hash` uses 4-byte big-endian length-prefixed domain separation over `AUDIT_RECORD_V1`, decimal sequence, previous hash, and content hash to prevent field-boundary ambiguity.
 
 ### Acceptance criteria
 

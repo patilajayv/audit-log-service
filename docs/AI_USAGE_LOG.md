@@ -31,3 +31,29 @@ This log records AI-assisted work honestly. Each future entry will identify the 
 - **Earlier manual validation limitations:** The trigger-validation row used placeholder hashes and was not a cryptographically valid audit-chain event. These checks validate migration, permissions, and trigger behavior only; they do not validate application hash computation or the future append workflow.
 - **Manual isolated database validation:** Flyway validated and applied `V1` and `V2` to a separate disposable database isolated from the normal Compose database. The `audit_app` role had `INSERT` on `audit_event`, no `UPDATE` on `audit_event`, and `UPDATE` on `audit_chain_head`. One clearly synthetic event was committed at sequence 1 and the chain head advanced to its synthetic record hash. The database rejected an incorrect event previous hash, head advancement without a corresponding event, head advancement with a mismatched record hash, a commit that omitted the required head advancement, and a jump from sequence 1 to 3. After every rejected operation, the database retained exactly that one event and its original sequence-1 chain head; no partial changes persisted.
 - **Manual validation limitations:** The isolated checks used repeated-character synthetic hashes. They validate database constraints and transaction behavior, not cryptographic hash correctness or tamper-proofness. The automated concurrency test covers competing direct database transactions, not the application-level append API or the full end-to-end audit workflow. The older disposable validation database may retain a synthetic orphan row from prior trigger testing and was not modified during this validation.
+
+## 2026-10-15 - Milestone 4 canonical hashing and transactional append
+
+- **Task:** Implement canonical audit event hashing and application-level transactional event append service.
+- **AI contribution:**
+  - Implemented `AuditHashService` and `AuditAppendService` based on Spring Boot, JDBC, and `io.github.erdtman:java-json-canonicalization:1.1`.
+  - Replaced initial custom Jackson serializer with `java-json-canonicalization:1.1` following review of RFC 8785 (JCS) compliance (negative zero normalization, IEEE-754 exponent formatting, subnormal handling).
+  - Implemented strict numeric validation in `validatePayload()` rejecting integers outside the safe IEEE-754 range [-(2^53 - 1), 2^53 - 1], non-finite numbers (NaN, Infinity), and overflowing decimals.
+  - Enforced millisecond UTC truncation (`ChronoUnit.MILLIS`) for `recordedAt` and `sourceTimestamp` at ingestion.
+  - Added independent hardcoded SHA-256 test vectors in `AuditHashServiceTest` using external oracles.
+  - Implemented integration tests in `AuditAppendServiceIntegrationTests` covering genesis append, linked second event, rollback on deferred constraint trigger, request validation, and concurrent append serialization against isolated Testcontainers PostgreSQL.
+- **Engineer oversight:**
+  - Audited canonical JSON implementation against RFC 8785 and RFC 7493 requirements; rejected custom Jackson serializer in favor of a verified RFC 8785 library.
+  - Mandated explicit numeric policy rejecting unsafe integers instead of silently losing precision.
+  - Directed timestamp millisecond truncation at creation and ingestion.
+  - Reviewed working tree diffs, test counts, and pre-commit status before approving local commit and push.
+- **Decision:** Approved by the engineer. Committed as `2597c7f` with message `feat: implement canonical audit event hashing and append service` and pushed to `origin/main`.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditHashServiceTest`: 29 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditAppendServiceIntegrationTests`: 18 tests run, 0 failures, 0 errors, 0 skipped.
+    - `FlywayMigrationIntegrationTests`: 15 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditLogServiceApplicationTests`: 1 test run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 63 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.
+  - Independent verification: Expected hash constants in tests were independently verified using RFC 8785 reference values and external SHA-256 tools, avoiding self-referential oracles.
