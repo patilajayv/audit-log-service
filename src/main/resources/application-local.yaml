@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: ${AUDIT_DB_URL:jdbc:postgresql://localhost:5432/audit_log}
+    username: ${AUDIT_DB_USER:audit_app}
+    password: ${AUDIT_DB_PASSWORD:local-development-password}
+  flyway:
+    enabled: true
+    url: ${AUDIT_MIGRATOR_DB_URL:jdbc:postgresql://localhost:5432/audit_log}
+    user: ${AUDIT_MIGRATOR_DB_USER:audit_migrator}
+    password: ${AUDIT_MIGRATOR_DB_PASSWORD:local-migrator-password}
+    locations: classpath:db/migration

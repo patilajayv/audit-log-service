@@ -4,7 +4,7 @@ This repository contains a Java 17 and Spring Boot 3 prototype for the Audit Log
 
 ## Current milestone
 
-The project foundation provides a minimal Spring Boot application, a context-load test, and local PostgreSQL configuration. Audit event APIs, persistence, hashing, security, and migrations are added in later milestones.
+The project foundation provides a minimal Spring Boot application, a context-load test, local PostgreSQL configuration, and Flyway database migrations. Audit event APIs, hashing, and security are added in later milestones.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ The project foundation provides a minimal Spring Boot application, a context-loa
 - Maven 3.9 or later
 - Docker Desktop with Docker Compose
 
-The current workstation runs Maven with JDK 24. Maven compiles this project with Java 17 compatibility through the Spring Boot `java.version` setting. Install and select a Java 17 JDK before final validation and submission.
+The latest Maven test run on this workstation used Java 17.0.16. Other developer workstations may use different Java runtimes; use a Java 17 JDK when validating this project.
 
 ## Build and test
 
@@ -26,7 +26,11 @@ mvn test
 docker compose up -d
 ```
 
-The Compose credentials are for local development only. Runtime database configuration and migrations will be added with the persistence milestone.
+The Compose credentials are for local development only. PostgreSQL is published only on `127.0.0.1:5432`, so the local profile continues to use `localhost`. The container bootstrap creates the limited `audit_app` role, while `audit_migrator` owns schema migration. Start the application with the local profile to run Flyway migrations:
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=local
+```
 
 ## Repository scope
 

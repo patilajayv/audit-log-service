@@ -83,6 +83,10 @@ The append service runs one transaction:
 
 The head-row lock serializes writers. A failed insert, hash computation, or head update rolls back the whole transaction. This limits write throughput but is a clear and correct prototype trade-off.
 
+Database triggers provide defense in depth for the same ordering. The insert trigger locks the chain head and accepts only the next sequence with the current head hash as `previous_hash`. The head-update trigger then requires that inserted event to have the new head sequence and hash. A deferred constraint trigger rejects a transaction that inserts an event without advancing the head to it. The service still takes the lock explicitly before calculating hashes; application-level concurrency has not yet been integration-tested.
+
+The chain-head linkage protection is delivered as a forward-only Flyway `V2` migration. Fresh databases apply `V1` followed by `V2`; databases that already recorded `V1` retain their migration history and receive `V2` on the next Flyway run.
+
 ### Verification behavior
 
 Verification reads rows by `sequence_no` and stops at the first error. It checks genesis use, contiguous sequence numbers, recomputed content hashes, recomputed record hashes, and previous-link equality. It finally compares the last scanned row to `audit_chain_head`.
@@ -92,6 +96,8 @@ Violation types include `GENESIS_MISMATCH`, `SEQUENCE_GAP`, `CONTENT_HASH_MISMAT
 ## Append-only controls
 
 The normal application database role receives only the minimum `SELECT` and `INSERT` rights for audit events. Migration and administrative identities are separate. PostgreSQL triggers reject `UPDATE`, `DELETE`, and `TRUNCATE` against `audit_event`; normal application APIs expose no mutation routes.
+
+For local development, Docker Compose starts PostgreSQL as `audit_migrator` and bootstraps the limited `audit_app` role. Flyway runs with the migrator identity; the application uses `audit_app`. PostgreSQL is bound only to the loopback interface for host access. Operational environments must provision equivalent roles before migration. These controls prevent accidental application mutations, but schema owners and superusers can change permissions, disable triggers, or rewrite data.
 
 The required tampering demonstration uses a separately authorized administrative connection in a documented test procedure. It temporarily bypasses the protection or uses a maintenance-only path to alter a row, then calls the ordinary verification API. The application role never receives update or delete rights.
 
