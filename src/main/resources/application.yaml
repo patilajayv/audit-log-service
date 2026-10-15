@@ -15,3 +15,12 @@ audit:
       password: ${AUDIT_SECURITY_REGULATOR_PASSWORD:}
   retention:
     window-days: ${AUDIT_RETENTION_WINDOW_DAYS:}
+  rate-limit:
+    enabled: ${AUDIT_RATE_LIMIT_ENABLED:true}
+    ip-requests-per-minute: ${AUDIT_RATE_LIMIT_IP_RPM:120}
+    ip-burst-capacity: ${AUDIT_RATE_LIMIT_IP_BURST:30}
+    ip-max-buckets: ${AUDIT_RATE_LIMIT_IP_MAX_BUCKETS:5000}
+    principal-requests-per-minute: ${AUDIT_RATE_LIMIT_PRINCIPAL_RPM:240}
+    principal-burst-capacity: ${AUDIT_RATE_LIMIT_PRINCIPAL_BURST:60}
+    principal-max-buckets: ${AUDIT_RATE_LIMIT_PRINCIPAL_MAX_BUCKETS:1000}
+    idle-window-seconds: ${AUDIT_RATE_LIMIT_IDLE_WINDOW:300}

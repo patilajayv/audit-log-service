@@ -1,0 +1,50 @@
+name: CI Build & Automated Verification
+
+on:
+  push:
+    branches:
+      - main
+      - engineering-hardening
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+      - engineering-hardening
+
+jobs:
+  test:
+    name: Build, Test & Coverage Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Grant execution permission for Maven Wrapper
+        run: chmod +x mvnw
+
+      - name: Run automated test suite with JaCoCo coverage
+        run: ./mvnw clean test --batch-mode --no-transfer-progress
+
+      - name: Upload Surefire test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-test-reports
+          path: target/surefire-reports/
+          retention-days: 14
+
+      - name: Upload JaCoCo coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+          retention-days: 14

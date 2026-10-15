@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.Set;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
@@ -38,7 +39,12 @@ import org.springframework.util.StringUtils;
  */
 @Configuration
 @EnableWebSecurity
-@EnableConfigurationProperties({SecurityUserProperties.class, AuditRetentionProperties.class, com.example.auditlog.export.AuditExportProperties.class})
+@EnableConfigurationProperties({
+        SecurityUserProperties.class,
+        AuditRetentionProperties.class,
+        com.example.auditlog.export.AuditExportProperties.class,
+        RateLimitingProperties.class
+})
 public class SecurityConfiguration {
 
     private static final Set<String> INSECURE_PASSWORDS = Set.of(
@@ -51,11 +57,15 @@ public class SecurityConfiguration {
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
             RestAuthenticationEntryPoint authenticationEntryPoint,
-            RestAccessDeniedHandler accessDeniedHandler) throws Exception {
+            RestAccessDeniedHandler accessDeniedHandler,
+            PreAuthIpRateLimitingFilter preAuthIpRateLimitingFilter,
+            PostAuthPrincipalRateLimitingFilter postAuthPrincipalRateLimitingFilter) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .httpBasic(basic -> basic.authenticationEntryPoint(authenticationEntryPoint))
+                .addFilterBefore(preAuthIpRateLimitingFilter, org.springframework.security.web.authentication.www.BasicAuthenticationFilter.class)
+                .addFilterAfter(postAuthPrincipalRateLimitingFilter, org.springframework.security.web.authentication.www.BasicAuthenticationFilter.class)
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(authenticationEntryPoint)
                         .accessDeniedHandler(accessDeniedHandler)
@@ -160,5 +170,64 @@ public class SecurityConfiguration {
     @Bean
     public RestAccessDeniedHandler restAccessDeniedHandler(ObjectMapper objectMapper, Clock clock) {
         return new RestAccessDeniedHandler(objectMapper, clock);
+    }
+
+    @Bean
+    public NanoTimeSource nanoTimeSource() {
+        return NanoTimeSource.system();
+    }
+
+    @Bean
+    public TokenBucketRateLimiter ipRateLimiter(RateLimitingProperties properties) {
+        return new TokenBucketRateLimiter(
+                properties.getIpRequestsPerMinute(),
+                properties.getIpBurstCapacity(),
+                properties.getIpMaxBuckets(),
+                properties.getIdleWindowSeconds(),
+                properties.isEnabled());
+    }
+
+    @Bean
+    public TokenBucketRateLimiter principalRateLimiter(RateLimitingProperties properties) {
+        return new TokenBucketRateLimiter(
+                properties.getPrincipalRequestsPerMinute(),
+                properties.getPrincipalBurstCapacity(),
+                properties.getPrincipalMaxBuckets(),
+                properties.getIdleWindowSeconds(),
+                properties.isEnabled());
+    }
+
+    @Bean
+    public PreAuthIpRateLimitingFilter preAuthIpRateLimitingFilter(
+            TokenBucketRateLimiter ipRateLimiter,
+            NanoTimeSource nanoTimeSource,
+            Clock clock,
+            ObjectMapper objectMapper) {
+        return new PreAuthIpRateLimitingFilter(ipRateLimiter, nanoTimeSource, clock, objectMapper);
+    }
+
+    @Bean
+    public FilterRegistrationBean<PreAuthIpRateLimitingFilter> preAuthIpRateLimitingFilterRegistration(
+            PreAuthIpRateLimitingFilter filter) {
+        FilterRegistrationBean<PreAuthIpRateLimitingFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public PostAuthPrincipalRateLimitingFilter postAuthPrincipalRateLimitingFilter(
+            TokenBucketRateLimiter principalRateLimiter,
+            NanoTimeSource nanoTimeSource,
+            Clock clock,
+            ObjectMapper objectMapper) {
+        return new PostAuthPrincipalRateLimitingFilter(principalRateLimiter, nanoTimeSource, clock, objectMapper);
+    }
+
+    @Bean
+    public FilterRegistrationBean<PostAuthPrincipalRateLimitingFilter> postAuthPrincipalRateLimitingFilterRegistration(
+            PostAuthPrincipalRateLimitingFilter filter) {
+        FilterRegistrationBean<PostAuthPrincipalRateLimitingFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 }
