@@ -366,8 +366,31 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Required accurate documentation of regulator environment variables (`AUDIT_SECURITY_REGULATOR_USERNAME`, `AUDIT_SECURITY_REGULATOR_PASSWORD`) and prototype limitations.
   - Enforced strict documentation-only constraint (no changes to source code, tests, configuration, or Flyway migrations).
   - Reviewed pre-commit working tree status and diffs.
-- **Decision:** Milestone 13 documentation remediation applied. Changes remain uncommitted locally pending engineer review and approval.
+- **Decision:** Reviewed and approved by the engineer. Committed as `f78c17c` with message `docs: complete final submission documentation and attestation` and pushed to `origin/main`.
 - **Validation:**
   - `git diff --check` passed cleanly with 0 whitespace errors.
   - Confirmed 0 modifications to Java source files, test files, configuration files, or Flyway migrations V1–V4.
   - `git status --short` verified exactly four modified documentation files: `ATTESTATION.md`, `README.md`, `docs/AI_USAGE_LOG.md`, and `docs/TESTING_AND_BACKLOG.md`.
+
+## 2026-10-15 - Live defense demonstration guide and live environment developer validation
+
+- **Task:** Create comprehensive live defense demonstration guide (`docs/LIVE_DEMO_GUIDE.md`) and document developer live-environment execution and validation across all 8 demonstration phases.
+- **AI contribution:**
+  - Authored `docs/LIVE_DEMO_GUIDE.md` detailing the 10–15 minute presentation flow, exact curl commands, role requirements, response fields, verbal interview talking points, database trigger bypass commands for live tamper detection, and Q&A defense cheat sheet.
+  - Recorded developer live test execution results in `docs/LIVE_DEMO_GUIDE.md` and `docs/TESTING_AND_BACKLOG.md`.
+- **Engineer oversight:**
+  - Manually started the local PostgreSQL container and Spring Boot application.
+  - Executed all 8 demonstration steps live against `http://localhost:8080`:
+    1. Event ingestion (`POST /audit/events`, `ROLE_AUDIT_WRITER`, sequence 2).
+    2. Filtered querying with stable pagination (`GET /audit/events`, `ROLE_AUDITOR`).
+    3. Chain integrity verification (`GET /audit/verify`, `status: INTACT`), live database tampering via superuser update on sequence 2, immediate detection of `status: CORRUPTED` with `CONTENT_HASH_MISMATCH`, and clean restoration.
+    4. Soft archival (`POST /audit/archive/{id}`), default query exclusion, explicit inclusion via `includeArchived=true`, and unbroken chain verification (`INTACT`) with zero false positives.
+    5. Structured payload redaction (`POST /audit/events/{id}/redact`), automatic append of `PAYLOAD_REDACTED` meta-event, and query projection masking `[REDACTED]`.
+    6. Verifiable bulk export (`GET /audit/exports`), and executed standalone standard-library Python verifier `scripts/verify_export.py` reporting `Status: PARTIALLY_VERIFIED_REDACTED` verifying chain linkage while honestly flagging masked payload content.
+    7. Compliance query (`GET /audit/compliance/account-access`, `ROLE_REGULATOR`), automatic append of `REGULATORY_AUDIT_ACCESSED` supervisory event, and recursion isolation.
+    8. Security negative testing: 401 unauthenticated challenge, 403 regulator role denial on internal logs, and 403 default-deny.
+  - Verified and approved documentation updates.
+- **Decision:** Changes uncommitted locally pending engineer review.
+- **Validation:**
+  - `git diff --check` passed cleanly with 0 whitespace errors.
+  - Confirmed 0 modifications to application source code, tests, configuration, or Flyway migrations.

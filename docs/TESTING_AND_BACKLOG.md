@@ -300,6 +300,19 @@ The full Maven test suite passed under Java 17.0.16 with **272 tests run, 0 fail
   - Confirms production startup validation rejects missing regulator username and missing regulator password.
 - **Previous baseline tests (243 tests)**: All 243 previously existing tests continue to pass without regression.
 
+## Milestone 13 live environment developer test status
+
+On 2026-10-15, the developer manually executed and verified the complete 8-step live demonstration against the running PostgreSQL 16 container and Spring Boot 3 application under profile `local` (detailed in `docs/LIVE_DEMO_GUIDE.md`):
+
+1. **Audit Event Ingestion (Step 1):** Ingested event via `POST /audit/events` with role `local_writer`; received HTTP 201 with `sequenceNo: 2`, `contentHash: 7239413a...`, `previousHash: 9140a12b...`, and `recordHash: d8efdbc5...`.
+2. **Filtered Queries (Step 2):** Queried `GET /audit/events?resourceType=ACCOUNT&resourceId=ACCT-987654` with role `local_auditor`; received HTTP 200 with `totalElements: 1` and deterministic sequence ordering.
+3. **Chain Integrity & Tamper Detection (Step 3):** Verified `status: INTACT` across 2 records; confirmed trigger protection blocked direct update (`audit_event_reject_update_delete`); once administratively disabled, modified sequence 2 payload in PostgreSQL; `GET /audit/verify` immediately detected `status: CORRUPTED` with `CONTENT_HASH_MISMATCH` at sequence 2 (`expected: 24dcd350...`, `actual: 7239413a...`); restored original payload and re-verified `status: INTACT`.
+4. **Retention & Soft Archival (Step 4):** Archived event via `POST /audit/archive/{id}` (HTTP 200); default query excluded it (`totalElements: 0`); query with `includeArchived=true` included it with populated `archivedAt`; `/audit/verify` verified `status: INTACT` with zero false-positive breaks.
+5. **Structured Redaction (Step 5):** Redacted `accountNumber` via `POST /audit/events/{id}/redact` (`HTTP 200`, `status: COMPLETED`, `redactionType: MASKED`, `metaAuditSequenceNo: 5`); automatically appended `PAYLOAD_REDACTED` meta-event at sequence 5; query projection displayed `accountNumber: "[REDACTED]"`.
+6. **Bulk Export & Independent Verification (Step 6):** Exported bundle via `GET /audit/exports?resourceId=ACCT-987654`; executed standalone Python verifier `scripts/verify_export.py`; returned `Status: PARTIALLY_VERIFIED_REDACTED` across 5 linked records, confirming unbroken chain linkage while honestly flagging masked payload content.
+7. **Regulator Compliance & Supervisory Meta-Events (Step 7):** Queried account access via `GET /audit/compliance/account-access?accountId=ACCT-987654` with `local_regulator` (`HTTP 200`, `totalElements: 4`); verified automatic append of `REGULATORY_AUDIT_ACCESSED` supervisory event at sequence 6 with `resourceType = "COMPLIANCE_AUDIT"`; confirmed supervisory events are excluded from subsequent account query results (preventing query recursion loops).
+8. **Security & Least Privilege (Step 8):** Verified sanitized `HTTP 401 Unauthorized` with `WWW-Authenticate: Basic realm="AuditLogService"`, `HTTP 403 Forbidden` for regulator accessing internal audit log, and `HTTP 403 Forbidden` on unmapped routes.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)

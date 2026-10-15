@@ -27,6 +27,16 @@ All three assessment scenarios are fully implemented, verified, and committed:
   - Supervisory recursion prevention: supervisory events use `resourceType = 'COMPLIANCE_AUDIT'`, completely isolating them from account queries to prevent feedback loops and pagination drift while keeping 100% of rows verifiable under `GET /audit/verify`.
   - Least-privilege authorization: provisioned `ROLE_REGULATOR` restricted strictly to compliance endpoints, with HTTP 403 Forbidden on general queries, exports, verification, and mutation routes.
 
+## Live Defense Demonstration Guide
+
+A complete, interview-ready demonstration guide and live execution log is available in [`docs/LIVE_DEMO_GUIDE.md`](docs/LIVE_DEMO_GUIDE.md). It provides:
+- A concise 10–15 minute presentation sequence.
+- Exact copy-pasteable `curl` commands for all 8 demonstration phases.
+- Live tamper detection commands simulating administrative database modification and immediate detection.
+- Standalone Python 3 export verifier execution (`scripts/verify_export.py`).
+- The developer's live environment validation log executed on 2026-10-15.
+- A strategic Live Defense Q&A cheat sheet covering design trade-offs and regulatory standards.
+
 ## API & Authorization Matrix
 
 | Endpoint | HTTP Method | Role Required | Purpose |
