@@ -6,6 +6,8 @@ import com.example.auditlog.append.AppendEventRequest;
 import com.example.auditlog.append.AppendEventResult;
 import com.example.auditlog.append.AuditAppendService;
 import com.example.auditlog.archival.AuditArchivalService;
+import com.example.auditlog.redaction.AuditRedactionService;
+import com.example.auditlog.redaction.RedactionRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
@@ -80,6 +82,9 @@ class AuditQueryIntegrationTests {
 
     @Autowired
     private AuditArchivalService archivalService;
+
+    @Autowired
+    private AuditRedactionService redactionService;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -427,6 +432,42 @@ class AuditQueryIntegrationTests {
         assertThat(headAfter).isEqualTo(headBefore);
         assertThat(countAfter).isEqualTo(countBefore);
         assertThat(archiveCountAfter).isEqualTo(archiveCountBefore);
+    }
+
+    @Test
+    @DisplayName("GET /audit/events returns [REDACTED] for redacted fields while preserving immutable hashes")
+    void testQueryReturnsRedactedFieldProjectionWhilePreservingHashes() throws Exception {
+        JsonNode payload = objectMapper.readTree("""
+                {
+                  "accountNumber": "987654321",
+                  "transactionType": "DEPOSIT",
+                  "amount": 500.00
+                }
+                """);
+        AppendEventResult appendResult = appendService.append(new AppendEventRequest(
+                "DEPOSIT_RECORDED", "teller-1", "ACCOUNT", "acct-987", payload, Instant.now()));
+
+        // Redact accountNumber
+        redactionService.redact(appendResult.eventId(), new RedactionRequest(
+                "accountNumber", "GDPR_ARTICLE_17", "privacy-admin"));
+
+        ResponseEntity<AuditPageResponse<AuditEventDto>> response = restTemplate.exchange(
+                "/audit/events", HttpMethod.GET, null, EVENT_PAGE_TYPE);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        AuditPageResponse<AuditEventDto> body = response.getBody();
+        assertThat(body).isNotNull();
+
+        AuditEventDto returnedTarget = body.events().stream()
+                .filter(e -> e.eventId().equals(appendResult.eventId()))
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(returnedTarget.payload().path("accountNumber").asText()).isEqualTo("[REDACTED]");
+        assertThat(returnedTarget.payload().path("transactionType").asText()).isEqualTo("DEPOSIT");
+        assertThat(returnedTarget.payload().path("amount").asDouble()).isEqualTo(500.00);
+        assertThat(returnedTarget.contentHash()).isEqualTo(appendResult.contentHash());
+        assertThat(returnedTarget.recordHash()).isEqualTo(appendResult.recordHash());
     }
 
     private List<AppendEventResult> seedEvents(int count) throws Exception {

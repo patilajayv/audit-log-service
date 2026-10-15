@@ -219,6 +219,227 @@ class FlywayMigrationIntegrationTests {
     }
 
     @Test
+    void v4CreatesAuditEventRedactionTable() throws SQLException {
+        try (Connection connection = connection();
+                Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        SELECT column_name, data_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_name = 'audit_event_redaction'
+                        ORDER BY ordinal_position
+                        """)) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("redaction_id");
+            assertThat(result.getString("data_type")).isEqualTo("bigint");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("operation_id");
+            assertThat(result.getString("data_type")).isEqualTo("character varying");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("event_id");
+            assertThat(result.getString("data_type")).isEqualTo("uuid");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("field_path");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("redacted_at");
+            assertThat(result.getString("data_type")).isEqualTo("timestamp with time zone");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("reason");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("requested_by");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("redaction_type");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("status");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("key_id");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("meta_audit_sequence_no");
+            assertThat(result.getString("data_type")).isEqualTo("bigint");
+
+            assertThat(result.next()).isFalse();
+        }
+    }
+
+    @Test
+    void v4EnforcesAuditAppPrivilegesOnRedactionTable() throws SQLException {
+        UUID eventId = UUID.randomUUID();
+        try (Connection adminConn = connection()) {
+            appendEvent(adminConn, 1, GENESIS_HASH, FIRST_RECORD_HASH, eventId);
+        }
+
+        try (Connection appConn = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), "audit_app", APPLICATION_PASSWORD)) {
+
+            // INSERT and SELECT allowed
+            try (PreparedStatement stmt = appConn.prepareStatement("""
+                    INSERT INTO audit_event_redaction (
+                        operation_id, event_id, field_path, reason, requested_by, redaction_type, status
+                    ) VALUES ('op-1', ?, 'accountNumber', 'GDPR', 'officer-1', 'MASKED', 'PENDING')
+                    """)) {
+                stmt.setObject(1, eventId);
+                int rows = stmt.executeUpdate();
+                assertThat(rows).isEqualTo(1);
+            }
+
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "SELECT status FROM audit_event_redaction WHERE operation_id = 'op-1'")) {
+                try (ResultSet rs = stmt.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getString("status")).isEqualTo("PENDING");
+                }
+            }
+
+            // UPDATE permitted on status column
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'KEY_DESTROYED' WHERE operation_id = 'op-1'")) {
+                int updated = stmt.executeUpdate();
+                assertThat(updated).isEqualTo(1);
+            }
+
+            // UPDATE prohibited on reason column -> raises 42501 permission denied
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET reason = 'tampered' WHERE operation_id = 'op-1'")) {
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+            }
+
+            // UPDATE prohibited on field_path column -> raises 42501 permission denied
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET field_path = 'other' WHERE operation_id = 'op-1'")) {
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+            }
+
+            // DELETE prohibited -> raises permission denied
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "DELETE FROM audit_event_redaction WHERE operation_id = 'op-1'")) {
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+            }
+        }
+    }
+
+    @Test
+    void v4EnforcesRedactionLifecycleTrigger() throws SQLException {
+        UUID eventId = UUID.randomUUID();
+        try (Connection adminConn = connection()) {
+            appendEvent(adminConn, 1, GENESIS_HASH, FIRST_RECORD_HASH, eventId);
+            adminConn.setAutoCommit(true);
+
+            // Insert initial PENDING row
+            try (PreparedStatement stmt = adminConn.prepareStatement("""
+                    INSERT INTO audit_event_redaction (
+                        operation_id, event_id, field_path, reason, requested_by, redaction_type, status
+                    ) VALUES ('lifecycle-op', ?, 'ssn', 'CCPA', 'user-1', 'MASKED', 'PENDING')
+                    """)) {
+                stmt.setObject(1, eventId);
+                stmt.executeUpdate();
+            }
+
+            // Cannot jump directly PENDING -> COMPLETED
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'COMPLETED', meta_audit_sequence_no = 1 WHERE operation_id = 'lifecycle-op'")) {
+                SQLException ex = assertThrows(SQLException.class, stmt::executeUpdate);
+                assertThat(ex.getSQLState()).isEqualTo("55000");
+                assertThat(ex.getMessage()).contains("Invalid transition from PENDING to COMPLETED");
+            }
+
+            // Valid transition: PENDING -> KEY_DESTROYED
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'KEY_DESTROYED' WHERE operation_id = 'lifecycle-op'")) {
+                assertThat(stmt.executeUpdate()).isEqualTo(1);
+            }
+
+            // Cannot transition KEY_DESTROYED -> COMPLETED without meta_audit_sequence_no
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'COMPLETED' WHERE operation_id = 'lifecycle-op'")) {
+                SQLException ex = assertThrows(SQLException.class, stmt::executeUpdate);
+                assertThat(ex.getSQLState()).isEqualTo("55000");
+                assertThat(ex.getMessage()).contains("without a valid meta_audit_sequence_no");
+            }
+
+            // Valid completion transition with meta_audit_sequence_no
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'COMPLETED', meta_audit_sequence_no = 1 WHERE operation_id = 'lifecycle-op'")) {
+                assertThat(stmt.executeUpdate()).isEqualTo(1);
+            }
+
+            // Once COMPLETED, record is sealed permanently
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "UPDATE audit_event_redaction SET status = 'PENDING' WHERE operation_id = 'lifecycle-op'")) {
+                SQLException ex = assertThrows(SQLException.class, stmt::executeUpdate);
+                assertThat(ex.getSQLState()).isEqualTo("55000");
+                assertThat(ex.getMessage()).contains("sealed and immutable once COMPLETED");
+            }
+
+            // DELETE prohibited by trigger even for admin
+            try (PreparedStatement stmt = adminConn.prepareStatement(
+                    "DELETE FROM audit_event_redaction WHERE operation_id = 'lifecycle-op'")) {
+                SQLException ex = assertThrows(SQLException.class, stmt::executeUpdate);
+                assertThat(ex.getSQLState()).isEqualTo("55000");
+                assertThat(ex.getMessage()).contains("prohibited on audit_event_redaction");
+            }
+        }
+    }
+
+    @Test
+    void v4RejectsDuplicateMetaAuditOperationIdOnAuditEvent() throws SQLException {
+        try (Connection connection = connection()) {
+            UUID eventId1 = UUID.randomUUID();
+            UUID eventId2 = UUID.randomUUID();
+            String metaPayload = "{\"redactionOperationId\":\"op-dup-test\",\"fieldPath\":\"ssn\"}";
+
+            // Insert first PAYLOAD_REDACTED event advancing chain head
+            connection.setAutoCommit(false);
+            try (PreparedStatement stmt = connection.prepareStatement("""
+                    INSERT INTO audit_event (
+                        sequence_no, event_id, event_type, actor_id, resource_type, resource_id,
+                        payload, recorded_at, canonicalization_version, content_hash, previous_hash, record_hash
+                    ) VALUES (1, ?, 'PAYLOAD_REDACTED', 'actor-1', 'USER', 'u-1',
+                              ?::jsonb, CURRENT_TIMESTAMP, 'JCS-1', repeat('a', 64), repeat('0', 64), repeat('b', 64))
+                    """)) {
+                stmt.setObject(1, eventId1);
+                stmt.setString(2, metaPayload);
+                stmt.executeUpdate();
+            }
+            advanceHead(connection, 1, "b".repeat(64));
+            connection.commit();
+
+            // Attempting to insert a second PAYLOAD_REDACTED event with identical redactionOperationId must fail with unique constraint violation (23505)
+            connection.setAutoCommit(false);
+            try (PreparedStatement stmt = connection.prepareStatement("""
+                    INSERT INTO audit_event (
+                        sequence_no, event_id, event_type, actor_id, resource_type, resource_id,
+                        payload, recorded_at, canonicalization_version, content_hash, previous_hash, record_hash
+                    ) VALUES (2, ?, 'PAYLOAD_REDACTED', 'actor-1', 'USER', 'u-1',
+                              ?::jsonb, CURRENT_TIMESTAMP, 'JCS-1', repeat('c', 64), repeat('b', 64), repeat('d', 64))
+                    """)) {
+                stmt.setObject(1, eventId2);
+                stmt.setString(2, metaPayload);
+                SQLException ex = assertThrows(SQLException.class, stmt::executeUpdate);
+                assertThat(ex.getSQLState()).isEqualTo("23505");
+                assertThat(ex.getMessage()).contains("idx_audit_event_meta_redaction_op");
+            } finally {
+                connection.rollback();
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    @Test
     void migrationRejectsHeadAdvanceWithoutMatchingEvent() throws SQLException {
         try (Connection connection = connection(); Statement statement = connection.createStatement()) {
             SQLException exception = assertThrows(

@@ -177,6 +177,54 @@ The full Maven test suite passed under Java 17.0.16 with **177 tests run, 0 fail
   - Validates `includeArchived` query parameter parsing and response DTO mapping.
 - **Previous baseline tests (145 tests)**: All 18 append WebMvc tests, 7 append integration tests, 9 query WebMvc tests, 10 query integration tests, 3 verify WebMvc tests, 15 verify integration tests, 13 security integration tests, 7 credential validation tests, 29 hash unit tests, 18 append service tests, 15 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
 
+## Milestone 10 validation status
+
+Milestone 10 implemented structured payload redaction (Scenario B), pluggable key management with AES-256-GCM envelope encryption, forward-only Flyway V4 migration (`audit_event_redaction`), redaction REST API (`POST /audit/events/{eventId}/redact`), exactly-once logical meta-auditing (`PAYLOAD_REDACTED`) with pre-append ledger reconciliation discovery, database-enforced immutability and lifecycle triggers, backward-compatible soft-masking for legacy plaintext events, and read-projection masking (`"[REDACTED]"`).
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **203 tests run, 0 failures, 0 errors, and 0 skipped** (26 new tests added):
+
+- **`AuditCryptoServiceTest` (5 tests)**: Unit tests for cryptographic operations and key lifecycle:
+  - AES-256-GCM encryption and decryption roundtrip with 12-byte IV and 128-bit authentication tag.
+  - Decrypting an envelope after key destruction throws `KeyDestroyedException`.
+  - Tampered ciphertext is rejected by GCM tag verification (`GeneralSecurityException`).
+  - Tampered IV is rejected by GCM tag verification (`GeneralSecurityException`).
+  - `KeyManager.destroyKey` is strictly idempotent (subsequent destruction returns false without error).
+- **`AuditRedactionControllerWebMvcTest` (6 tests)**: MockMvc controller slice tests for `POST /audit/events/{eventId}/redact`:
+  - Valid redaction request returns HTTP 200 with structured `RedactionResult`.
+  - Non-existent event returns HTTP 404 with sanitized `ErrorResponse`.
+  - Missing field path in payload returns HTTP 400 Bad Request.
+  - Validation failure on empty field path, reason, or requestedBy returns HTTP 400 Bad Request.
+  - Key destruction failure in KMS returns HTTP 502 Bad Gateway with sanitized error message.
+  - Non-POST request (e.g. GET) is rejected with HTTP 403 Forbidden by default deny.
+- **`AuditRedactionServiceIntegrationTests` (9 tests)**: End-to-end integration tests against isolated Testcontainers PostgreSQL 16:
+  - Plaintext legacy event redaction masks read projection without mutating `audit_event` rows, sequence numbers, or cryptographic hashes (`content_hash`, `record_hash`).
+  - Appended `PAYLOAD_REDACTED` meta-event contains zero sensitive plaintext disclosure.
+  - Complete-chain verification (`GET /audit/verify`) confirms `status: "INTACT"` before and after redactions.
+  - Query API returns `"[REDACTED]"` in projected payload with original hashes intact.
+  - Encrypted envelope redaction destroys DEK in `KeyManager` and achieves true cryptographic erasure (`redaction_type = "CRYPTO_SHREDDED"`).
+  - Attempted decryption of shredded envelope throws `KeyDestroyedException`.
+  - Redaction is strictly idempotent: repeated requests return original result and do not append duplicate meta-events.
+  - Reconciliation discovery: an interrupted run that already appended a meta-event discovers it on retry and links its sequence number without duplicate append.
+  - Concurrency: concurrent threads serialize cleanly and produce exactly one meta-event and one key destruction.
+  - Multi-transaction concurrency: independent concurrent transactions lock with `SELECT ... FOR UPDATE` via `AuditRedactionCoordinator`, serialize cleanly, append exactly one meta-event, and return identical results.
+  - Non-existent event throws `AuditEventNotFoundException` (HTTP 404).
+  - Non-existent field path throws `IllegalArgumentException` (HTTP 400).
+  - KMS failure transitions row to `KEY_DESTRUCTION_FAILED`, throws `RedactionKeyDestructionException`, appends no meta-event, and preserves ledger integrity.
+- **`FlywayMigrationIntegrationTests` (21 tests, 4 new)**: Flyway V4 migration structure, privileges, and triggers:
+  - `v4CreatesAuditEventRedactionTable`: confirms columns, data types, nullability, primary key, unique constraints, foreign keys, and indexes.
+  - `v4EnforcesAuditAppPrivilegesOnRedactionTable`: confirms `audit_app` role has `SELECT`, `INSERT`, and restricted `UPDATE (status, redacted_at, meta_audit_sequence_no)` only; attempts to update immutable metadata (`reason`, `field_path`, etc.) fail with `42501 permission denied`; `DELETE` and `TRUNCATE` fail with permission denied.
+  - `v4EnforcesRedactionLifecycleTrigger`: trigger rejects invalid transition `PENDING -> COMPLETED` directly; rejects transition to `COMPLETED` without valid `meta_audit_sequence_no`; permanently seals completed records (`55000: record is sealed and immutable once COMPLETED`); delete trigger prohibits `DELETE` and `TRUNCATE` even for administrative roles (`55000`).
+  - `v4RejectsDuplicateMetaAuditOperationIdOnAuditEvent`: confirms partial unique index `idx_audit_event_meta_redaction_op` enforces uniqueness on `audit_event` for `PAYLOAD_REDACTED` events and rejects duplicate operation IDs with SQLState `23505`.
+- **`AuditSecurityIntegrationTests` (21 tests, 3 new)**: Security role verification on redaction routes:
+  - `POST /audit/events/{eventId}/redact` unauthenticated returns HTTP 401 with `WWW-Authenticate` header.
+  - `POST /audit/events/{eventId}/redact` with `AUDITOR` role returns HTTP 403 Forbidden without `WWW-Authenticate` header.
+  - `POST /audit/events/{eventId}/redact` with `AUDIT_WRITER` role is authorized.
+- **`AuditQueryIntegrationTests` (14 tests, 1 new)**:
+  - `testQueryReturnsRedactedFieldProjectionWhilePreservingHashes`: verifies that `GET /audit/events` returns `"[REDACTED]"` for redacted field paths while preserving original immutable `contentHash` and `recordHash`.
+- **Previous baseline tests (177 tests)**: All 18 append WebMvc tests, 7 append integration tests, 10 query WebMvc tests, 13 query integration tests, 3 verify WebMvc tests, 16 verify integration tests, 18 security integration tests, 7 credential validation tests, 5 archival WebMvc tests, 6 retention validation tests, 9 archival service tests, 29 hash unit tests, 18 append service tests, 17 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -188,9 +236,10 @@ The full Maven test suite passed under Java 17.0.16 with **177 tests run, 0 fail
 7. [x] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests. (Milestone 7)
 8. [x] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests. (Milestone 8, `d69a172`)
 9. [x] Implement Scenario B configurable retention, soft archival (`POST /audit/archive/**`), Flyway V3 archive schema, and query filtering. (Milestone 9)
-10. [ ] Implement remaining Scenario B payload encryption envelopes, key destruction / redacted projections, and verifiable export bundle (`GET /audit/exports`).
-11. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
-12. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
+10. [x] Implement Scenario B structured payload redaction (`POST /audit/events/{eventId}/redact`), pluggable `KeyManager`, AES-256-GCM envelopes, crypto-shredding, Flyway V4 redaction metadata/triggers, and query projection masking. (Milestone 10)
+11. [ ] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains.
+12. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
+13. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
 
 ## Milestone discipline
 

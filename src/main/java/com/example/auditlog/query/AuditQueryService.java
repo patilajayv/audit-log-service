@@ -9,8 +9,11 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
@@ -26,6 +29,10 @@ import org.springframework.transaction.annotation.Transactional;
  * query and the data query exclude events that have a row in {@code audit_event_archive}.
  * When {@code true}, all events are returned and the {@link AuditEventDto#archivedAt()} field
  * is populated for archived events (null for non-archived events).
+ *
+ * <p>For events with completed redactions in {@code audit_event_redaction}, redacted field paths
+ * are masked with {@code "[REDACTED]"} in the returned payload projection without altering
+ * original database records or cryptographic hash commitments.
  */
 @Service
 @Transactional(readOnly = true)
@@ -116,7 +123,82 @@ public class AuditQueryService {
 
         List<AuditEventDto> events = jdbc.query(dataSql, new AuditEventRowMapper(), dataParams.toArray());
 
-        return AuditPageResponse.of(events, criteria.page(), criteria.size(), totalElements);
+        if (events.isEmpty()) {
+            return AuditPageResponse.of(events, criteria.page(), criteria.size(), totalElements);
+        }
+
+        // Apply read-time redaction masking for any completed redactions
+        List<UUID> eventIds = events.stream().map(AuditEventDto::eventId).toList();
+        String inPlaceholders = String.join(",", Collections.nCopies(eventIds.size(), "?::uuid"));
+        String redactionSql = "SELECT event_id, field_path FROM audit_event_redaction "
+                + "WHERE status = 'COMPLETED' AND event_id IN (" + inPlaceholders + ")";
+
+        Map<UUID, List<String>> redactionsByEvent = new HashMap<>();
+        jdbc.query(redactionSql, rs -> {
+            UUID eid = (UUID) rs.getObject("event_id");
+            String fp = rs.getString("field_path");
+            redactionsByEvent.computeIfAbsent(eid, k -> new ArrayList<>()).add(fp);
+        }, eventIds.stream().map(UUID::toString).toArray());
+
+        if (redactionsByEvent.isEmpty()) {
+            return AuditPageResponse.of(events, criteria.page(), criteria.size(), totalElements);
+        }
+
+        List<AuditEventDto> projectedEvents = new ArrayList<>(events.size());
+        for (AuditEventDto event : events) {
+            List<String> redactedPaths = redactionsByEvent.get(event.eventId());
+            if (redactedPaths != null && !redactedPaths.isEmpty()) {
+                JsonNode maskedPayload = maskPayload(event.payload(), redactedPaths);
+                projectedEvents.add(new AuditEventDto(
+                        event.sequenceNo(),
+                        event.eventId(),
+                        event.eventType(),
+                        event.actorId(),
+                        event.resourceType(),
+                        event.resourceId(),
+                        maskedPayload,
+                        event.sourceTimestamp(),
+                        event.recordedAt(),
+                        event.canonicalizationVersion(),
+                        event.contentHash(),
+                        event.previousHash(),
+                        event.recordHash(),
+                        event.archivedAt()));
+            } else {
+                projectedEvents.add(event);
+            }
+        }
+
+        return AuditPageResponse.of(projectedEvents, criteria.page(), criteria.size(), totalElements);
+    }
+
+    private JsonNode maskPayload(JsonNode originalPayload, List<String> fieldPaths) {
+        if (originalPayload == null || !originalPayload.isObject() || fieldPaths == null || fieldPaths.isEmpty()) {
+            return originalPayload;
+        }
+        ObjectNode cloned = originalPayload.deepCopy();
+        for (String fieldPath : fieldPaths) {
+            maskFieldPath(cloned, fieldPath);
+        }
+        return cloned;
+    }
+
+    private void maskFieldPath(ObjectNode root, String fieldPath) {
+        String[] parts = fieldPath.split("\\.");
+        JsonNode current = root;
+        for (int i = 0; i < parts.length - 1; i++) {
+            String part = parts[i];
+            if (current == null || !current.isObject()) {
+                return;
+            }
+            current = current.get(part);
+        }
+        if (current instanceof ObjectNode objectNode) {
+            String leaf = parts[parts.length - 1];
+            if (objectNode.has(leaf)) {
+                objectNode.put(leaf, "[REDACTED]");
+            }
+        }
     }
 
     private class AuditEventRowMapper implements RowMapper<AuditEventDto> {

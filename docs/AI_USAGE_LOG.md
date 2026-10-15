@@ -200,7 +200,7 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Restricted archival endpoints to `AUDIT_WRITER` role without inventing unapproved new roles.
   - Verified that `GET /audit/verify` continues to scan and validate 100% of historical events from genesis to chain head without false-positive failures.
   - Verified that query API excludes archived events by default (`includeArchived=false`) and surfaces `archivedAt` only when requested.
-- **Decision:** Pending engineer review. Milestone 9 changes uncommitted locally.
+- **Decision:** Approved by the engineer. Committed locally as `ba10b37` with message `feat: implement retention policy, soft archival, and query filtering` (local commit; unpushed to `origin`).
 - **Validation:**
   - Automated test results under Java 17.0.16 / Maven 3.9.11:
     - `AuditArchivalControllerWebMvcTest`: 5 tests run, 0 failures, 0 errors, 0 skipped.
@@ -213,3 +213,43 @@ This log records AI-assisted work honestly. Each future entry will identify the 
     - `AuditEventQueryControllerWebMvcTest`: 10 tests run, 0 failures, 0 errors, 0 skipped.
     - Full Maven suite: 177 tests run, 0 failures, 0 errors, 0 skipped.
   - `git diff --check` passed with 0 errors.
+
+## 2026-10-15 - Milestone 10 structured payload redaction
+
+- **Task:** Implement Scenario B structured payload redaction while preserving complete-chain cryptographic integrity (`POST /audit/events/{eventId}/redact`), Flyway V4 schema migration, envelope encryption/key destruction (`KeyManager`), redaction metadata table with immutable state triggers, read-time masking projections, `PAYLOAD_REDACTED` meta-audit events, exactly-once pre-append reconciliation discovery, and role authorization (`AUDIT_WRITER`).
+- **AI contribution:**
+  - Authored Flyway migration `V4__add_audit_event_redaction.sql` creating `audit_event_redaction` table, column-level grants (`SELECT, INSERT`, restricted `UPDATE (status, redacted_at, meta_audit_sequence_no)`), lifecycle state machine trigger `enforce_audit_event_redaction_lifecycle()` sealing `COMPLETED` records, and delete prevention trigger `prevent_audit_event_redaction_delete()`.
+  - Implemented `KeyManager` interface and `InMemoryKeyManager` with explicit disclosures of prototype software storage limitations and production KMS migration recommendations.
+  - Implemented `EncryptedEnvelope` record and `AuditCryptoService` providing AES-256-GCM authenticated encryption/decryption with 12-byte IV and 128-bit authentication tag, raising typed `KeyDestroyedException` when keys are destroyed.
+  - Implemented `AuditRedactionService` orchestrating structured field redaction, JVM-level per-operation locking, idempotency check fast-path, pre-append reconciliation discovery against `audit_event ((payload->>'redactionOperationId'))`, sanitized `PAYLOAD_REDACTED` meta-events omitting plaintext sensitive data, and sealed state updates.
+  - Updated `AuditQueryService` to project `"[REDACTED]"` on target field paths of returned events when redaction is completed, leaving database records, content hashes, and record hashes untouched.
+  - Updated `SecurityConfiguration` restricting `POST /audit/events/*/redact` to `AUDIT_WRITER`.
+  - Added `RedactionKeyDestructionException` handler in `AuditControllerAdvice` mapped to HTTP 502 Bad Gateway.
+  - Implemented 6 MockMvc controller slice tests in `AuditRedactionControllerWebMvcTest`.
+  - Implemented 5 crypto unit tests in `AuditCryptoServiceTest`.
+  - Implemented 8 integration tests in `AuditRedactionServiceIntegrationTests` covering envelope crypto-shredding, legacy plaintext masking, zero plaintext in meta-events, database immutability, full-chain verification integrity, idempotency, reconciliation recovery, concurrent serialization, and KMS failures.
+  - Added 3 migration tests in `FlywayMigrationIntegrationTests` (total 20 tests) for V4 schema, column grants, and lifecycle/delete triggers.
+  - Added 3 security integration tests in `AuditSecurityIntegrationTests` (total 21 tests) for redaction endpoint authorization.
+  - Added query redaction projection test in `AuditQueryIntegrationTests` (total 14 tests).
+- **Engineer oversight:**
+  - Selected Option A with pluggable `KeyManager` and required explicit disclosure that in-memory key storage is prototype-only, not production-grade cryptographic erasure.
+  - Mandated exactly-once logical meta-auditing via durable `redactionOperationId` and pre-append reconciliation discovery to prevent duplicate meta-events upon retry or transient failure.
+  - Required database-level enforcement of redaction-state immutability with column-level grants and PostgreSQL triggers sealing `COMPLETED` records against modification or deletion.
+  - Mandated that `POST /audit/events/{eventId}/redact` be restricted to `AUDIT_WRITER` and return zero plaintext sensitive values.
+  - Enforced that read-time projections mask target field paths without altering stored rows, sequence numbers, or cryptographic commitments (`GET /audit/verify` remains `INTACT`).
+- **Decision:** Pending engineer review. Milestone 10 changes uncommitted locally.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditCryptoServiceTest`: 5 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditRedactionControllerWebMvcTest`: 6 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditRedactionServiceIntegrationTests`: 9 tests run, 0 failures, 0 errors, 0 skipped (including multi-transaction concurrency serialized by `SELECT ... FOR UPDATE`).
+    - `FlywayMigrationIntegrationTests`: 21 tests run, 0 failures, 0 errors, 0 skipped (including unique constraint rejection on duplicate meta-event operation ID).
+    - `AuditSecurityIntegrationTests`: 21 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditQueryIntegrationTests`: 14 tests run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 205 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.
+- **Review and Blocker Fixes:**
+  - Independent review identified two blockers: (1) `idx_audit_event_meta_redaction_op` was a non-unique index permitting duplicate `PAYLOAD_REDACTED` events; (2) `AuditRedactionService` self-invoked a `@Transactional` method, bypassing Spring's proxy and separating the meta-event append from state finalization.
+  - Corrected `idx_audit_event_meta_redaction_op` to `CREATE UNIQUE INDEX` in `V4__add_audit_event_redaction.sql`.
+  - Extracted `AuditRedactionCoordinator` as a dedicated Spring `@Component` with an active `@Transactional` boundary, acquiring a pessimistic row lock (`SELECT ... FOR UPDATE`) on `audit_event_redaction` before reconciliation discovery and meta-event append.
+  - Added unit/integration tests confirming: (a) PostgreSQL rejects duplicate meta-audit operation IDs with SQLState `23505`; (b) independent concurrent transactions serialize via `SELECT ... FOR UPDATE` and produce exactly one meta-event append; (c) full test suite of 205 tests passes cleanly with 0 regressions.

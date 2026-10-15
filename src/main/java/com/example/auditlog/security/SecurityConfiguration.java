@@ -61,6 +61,7 @@ public class SecurityConfiguration {
                 )
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/audit/events").hasRole("AUDIT_WRITER")
+                        .requestMatchers(HttpMethod.POST, "/audit/events/*/redact").hasRole("AUDIT_WRITER")
                         .requestMatchers(HttpMethod.GET, "/audit/events").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/verify").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.POST, "/audit/archive/**").hasRole("AUDIT_WRITER")

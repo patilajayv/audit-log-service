@@ -137,6 +137,21 @@ public class AuditControllerAdvice {
                 .body(body);
     }
 
+    @ExceptionHandler(com.example.auditlog.redaction.RedactionKeyDestructionException.class)
+    public ResponseEntity<ErrorResponse> handleKeyDestructionException(
+            com.example.auditlog.redaction.RedactionKeyDestructionException ex, HttpServletRequest request) {
+        String correlationId = resolveCorrelationId(request);
+        log.error("Key destruction failure during redaction: keyId={} correlationId={}", ex.getKeyId(), correlationId, ex);
+        ErrorResponse body = new ErrorResponse(
+                HttpStatus.BAD_GATEWAY.value(),
+                HttpStatus.BAD_GATEWAY.getReasonPhrase(),
+                "Key destruction failed in Key Management Service",
+                clock.instant());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
+    }
+
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ErrorResponse> handleTypeMismatch(
             MethodArgumentTypeMismatchException ex, HttpServletRequest request) {

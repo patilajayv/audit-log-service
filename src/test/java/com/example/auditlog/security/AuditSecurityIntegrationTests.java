@@ -314,6 +314,65 @@ class AuditSecurityIntegrationTests {
     }
 
     // =========================================================================
+    // POST /audit/events/{eventId}/redact Authentication & Authorization
+    // =========================================================================
+
+    @Test
+    @DisplayName("POST /audit/events/{eventId}/redact without authentication returns 401 with WWW-Authenticate header")
+    void postRedact_unauthenticated_returns401() {
+        HttpEntity<String> request = new HttpEntity<>("""
+                {
+                  "fieldPath": "accountNumber",
+                  "reason": "GDPR",
+                  "requestedBy": "officer-1"
+                }
+                """, jsonHeaders());
+        ResponseEntity<ErrorResponse> response = restTemplate.postForEntity(
+                "/audit/events/" + UUID.randomUUID() + "/redact", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("POST /audit/events/{eventId}/redact with AUDITOR role returns 403 Forbidden")
+    void postRedact_auditorRole_returns403() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        HttpEntity<String> request = new HttpEntity<>("""
+                {
+                  "fieldPath": "accountNumber",
+                  "reason": "GDPR",
+                  "requestedBy": "officer-1"
+                }
+                """, jsonHeaders());
+        ResponseEntity<ErrorResponse> response = auditorTemplate.postForEntity(
+                "/audit/events/" + UUID.randomUUID() + "/redact", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("POST /audit/events/{eventId}/redact with AUDIT_WRITER role passes security check")
+    void postRedact_writerRole_authorized() {
+        TestRestTemplate writerTemplate = restTemplate.withBasicAuth("test-writer", "test-writer-password-123");
+        UUID nonExistentId = UUID.randomUUID();
+        HttpEntity<String> request = new HttpEntity<>("""
+                {
+                  "fieldPath": "accountNumber",
+                  "reason": "GDPR",
+                  "requestedBy": "officer-1"
+                }
+                """, jsonHeaders());
+        ResponseEntity<ErrorResponse> response = writerTemplate.postForEntity(
+                "/audit/events/" + nonExistentId + "/redact", request, ErrorResponse.class);
+
+        // Security check passed (not 401 or 403); reaches controller logic and returns 404 Not Found
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    // =========================================================================
     // Default Deny on Unmapped Endpoints
     // =========================================================================
 

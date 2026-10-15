@@ -5,10 +5,11 @@
 | Component | Responsibility |
 | --- | --- |
 | REST controllers | Validate API requests, map responses, and delegate to application services. |
-| Application services | Own append, search, verification, archival, redaction projection, and export workflows. |
+| Application services | Own append, search, verification, archival, redaction, and export workflows. |
+| Crypto & Redaction | Manages DEK lifecycle, AES-256-GCM envelope encryption, crypto-shredding, and read projections. |
 | Hash service | Canonicalizes event content and computes SHA-256 hashes. |
 | JPA repositories | Persist events and query filters; use a native lock query for the chain head. |
-| PostgreSQL | Holds immutable audit events, the chain head, and separate archival metadata. |
+| PostgreSQL | Holds immutable audit events, the chain head, archival metadata, and redaction records. |
 | Spring Security | Provides stateless HTTP Basic authentication and endpoint authorization. |
 
 ## API contracts
@@ -16,10 +17,11 @@
 | Endpoint | Contract | Authorization |
 | --- | --- | --- |
 | `POST /audit/events` | Accepts `eventType`, `actorId`, `resourceType`, `resourceId`, `payload`, and optional `sourceTimestamp`; returns `201` with event ID, sequence, server time, and hashes. Enforces a 1 MiB request body limit (HTTP 413) and strict duplicate key detection (HTTP 400). | `AUDIT_WRITER` |
-| `GET /audit/events` | Optional `actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`, `includeArchived` (default `false`), `page`, `size`; returns a stable sequence-ordered page. When `includeArchived=true`, includes `archivedAt` timestamp. | `AUDITOR` |
-| `GET /audit/verify` | Verifies the full global chain; returns intact status or first sequence and violation type. Streams all original events regardless of archival state. | `AUDITOR` |
+| `GET /audit/events` | Optional `actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`, `includeArchived` (default `false`), `page`, `size`; returns a stable sequence-ordered page. When `includeArchived=true`, includes `archivedAt` timestamp. Projected payloads mask completed redacted fields with `"[REDACTED]"` while preserving original cryptographic hashes. | `AUDITOR` |
+| `GET /audit/verify` | Verifies the full global chain; returns intact status or first sequence and violation type. Streams all original events regardless of archival or redaction state. | `AUDITOR` |
 | `POST /audit/archive/{eventId}` | Archives an individual event by ID. Idempotent (HTTP 200). Returns `ArchiveEventResult`. Returns HTTP 404 if event does not exist. | `AUDIT_WRITER` |
 | `POST /audit/archive/eligible` | Batch archives all events recorded before the configured retention cutoff window ($now - windowDays$). Idempotent (HTTP 200). Returns count of newly archived events and cutoff timestamp used. | `AUDIT_WRITER` |
+| `POST /audit/events/{eventId}/redact` | Redacts a sensitive field path within an event's payload. For encrypted envelopes, permanently destroys the DEK via `KeyManager.destroyKey` (crypto-shredding); for legacy plaintext, registers soft-masking. Appends an immutable `PAYLOAD_REDACTED` meta-audit event with zero sensitive plaintext. Idempotent with reconciliation discovery on retry. Returns `RedactionResult`. | `AUDIT_WRITER` |
 | `GET /audit/exports` | Scenario B endpoint. Requires exactly one of `actorId` or `resourceId`; returns a verifiable bundle. | `AUDITOR` |
 
 No `PUT`, `PATCH`, or `DELETE` audit-event endpoint will exist. Unauthenticated requests receive `401`; authenticated callers without the required role receive `403`.
@@ -70,6 +72,28 @@ Scenario B archival metadata keyed by `event_id` (Flyway `V3__add_audit_event_ar
 Index on `archived_at` accelerates time-based archival queries and pruning.
 The table is owned by `audit_migrator`, and the application role `audit_app` is granted `SELECT, INSERT` (no `UPDATE` or `DELETE`).
 Archiving records into this table never alters or mutates rows in `audit_event`, preserving all cryptographic hashes, sequences, and chain links.
+
+### `audit_event_redaction`
+
+Scenario B structured payload redaction metadata and lifecycle enforcement (Flyway `V4__add_audit_event_redaction.sql`).
+
+| Column | Type | Purpose |
+| --- | --- | --- |
+| `redaction_id` | `BIGSERIAL PRIMARY KEY` | Internal autoincrementing surrogate identifier. |
+| `operation_id` | `VARCHAR(256) UNIQUE NOT NULL` | Deterministic operation identifier (`"redact:" + event_id + ":" + field_path`) guaranteeing deduplication. |
+| `event_id` | `UUID NOT NULL` | References `audit_event(event_id)` with `ON DELETE RESTRICT`. |
+| `field_path` | `VARCHAR(256) NOT NULL` | Dot-delimited JSON property path targeted for redaction (e.g. `accountNumber`, `tax.id`). |
+| `redacted_at` | `TIMESTAMPTZ NOT NULL` | UTC timestamp when the redaction reached `COMPLETED`. |
+| `reason` | `VARCHAR(128) NOT NULL` | Business/regulatory reason for redaction (e.g., `GDPR_ARTICLE_17`, `CCPA_ERASURE`). |
+| `requested_by` | `VARCHAR(128) NOT NULL` | User or automated actor identity requesting redaction. |
+| `redaction_type` | `VARCHAR(32) NOT NULL` | `CRYPTO_SHREDDED` (key destroyed for encrypted envelope) or `MASKED` (projection-masked legacy event). |
+| `status` | `VARCHAR(32) NOT NULL` | State machine: `PENDING` $\rightarrow$ `KEY_DESTRUCTION_FAILED` $\vert$ `KEY_DESTROYED` $\rightarrow$ `COMPLETED`. |
+| `key_id` | `VARCHAR(256)` | Key identifier destroyed in `KeyManager` (null for legacy plaintext events). |
+| `meta_audit_sequence_no` | `BIGINT` | Sequence number of the immutable `PAYLOAD_REDACTED` event appended to `audit_event`. |
+
+Indexes support `event_id`, `redacted_at`, and `status`. A partial index on `audit_event ((payload->>'redactionOperationId')) WHERE event_type = 'PAYLOAD_REDACTED'` accelerates pre-append reconciliation discovery.
+The table is owned by `audit_migrator`. The application role `audit_app` is granted narrow column privileges: `SELECT, INSERT` on all columns, and `UPDATE (status, redacted_at, meta_audit_sequence_no)` only. Any attempt by `audit_app` to mutate immutable metadata columns (`reason`, `requested_by`, `field_path`, `event_id`, etc.) is blocked by PostgreSQL's permission model (`42501 permission denied`).
+Furthermore, `trg_audit_event_redaction_lifecycle` permanently seals completed records (disallowing any mutation once `COMPLETED`), validates monotonic state transitions, and enforces a non-null `meta_audit_sequence_no` before transitioning to `COMPLETED`. A delete trigger (`trg_audit_event_redaction_no_delete`) blocks `DELETE` and `TRUNCATE` operations even for administrative roles.
 
 ## Hash chain
 
@@ -209,8 +233,8 @@ The service implements stateless HTTP Basic authentication and role-based access
 
 | Role | Allowed operations | Prohibited operations |
 | --- | --- | --- |
-| `AUDIT_WRITER` | Create audit events (`POST /audit/events`), archive audit events (`POST /audit/archive/{eventId}`, `POST /audit/archive/eligible`). | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`). |
-| `AUDITOR` | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`), export records. | Create audit events (`POST /audit/events`), archive events (`POST /audit/archive/**`). |
+| `AUDIT_WRITER` | Create audit events (`POST /audit/events`), archive audit events (`POST /audit/archive/{eventId}`, `POST /audit/archive/eligible`), redact audit events (`POST /audit/events/{eventId}/redact`). | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`). |
+| `AUDITOR` | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`), export records. | Create audit events (`POST /audit/events`), archive events (`POST /audit/archive/**`), redact events (`POST /audit/events/*/redact`). |
 
 Production controls would add centralized identity (OIDC/OAuth2/mTLS), short-lived token issuance, secret management (Vault/AWS Secrets Manager), network policy restrictions, auditing of privileged database access, and separate operational roles.
 
@@ -239,11 +263,38 @@ Production controls would add centralized identity (OIDC/OAuth2/mTLS), short-liv
    - `GET /audit/events` excludes archived records by default using `WHERE NOT EXISTS (SELECT 1 FROM audit_event_archive a WHERE a.event_id = e.event_id)`.
    - When callers specify `includeArchived=true`, queries include both active and archived records via `LEFT JOIN audit_event_archive a ON a.event_id = e.event_id`, populating `archivedAt` on returned `AuditEventDto` objects.
 
-### Redaction and export
+### Structured payload redaction implementation (Scenario B)
 
-Soft archival records metadata without mutating the original chain row. Verification always scans archived events. Redaction uses encrypted payload envelopes before hashing; the stored ciphertext and envelope metadata stay immutable, while removing the decryption key produces a redacted response projection.
+1. **Cryptographic Invariants & Dual-Tier Verification**:
+   - Direct in-place mutation of `audit_event.payload` would invalidate `content_hash`, `record_hash`, and all subsequent hashes through to `audit_chain_head`.
+   - The physical row in `audit_event` is **never updated or deleted**. `prevent_audit_event_mutation` triggers remain strictly enforced.
+   - `GET /audit/verify` operates on the physical ledger rows and reports `status: "INTACT"` (0 false positives).
+   - `GET /audit/events` queries `audit_event_redaction` for completed redactions and projects a masked payload (`"[REDACTED]"` for target field paths) while preserving the original immutable hashes (`contentHash`, `recordHash`).
 
-Key destruction does not remove ciphertext, cannot recall previously disclosed plaintext, and depends on robust key management. It is an explicit prototype limitation.
+2. **Backward Compatibility & Ingestion Model**:
+   - **Category 1 (Legacy Plaintext Events)**: For events ingested without field encryption, redaction records `redaction_type = 'MASKED'` and applies presentation-layer masking on query projections. Original plaintext remains in the append-only ledger row, satisfying projection masking without physical erasure.
+   - **Category 2 (Encrypted Envelope Events)**: Sensitive fields are ingested wrapped in an `EncryptedEnvelope` (`algorithm: "AES-256-GCM"`, `keyId`, `ciphertext`, `iv`, `keyScope: "EVENT_FIELD"`). Redaction permanently destroys the DEK via `KeyManager.destroyKey(keyId)` and records `redaction_type = 'CRYPTO_SHREDDED'`. Once the DEK is destroyed, the stored ciphertext is mathematically indecipherable ($2^{256}$ keyspace), achieving cryptographic erasure (crypto-shredding) while keeping the stored ciphertext, `content_hash`, and chain continuity 100% intact.
+
+3. **Pluggable `KeyManager` Interface**:
+   - `KeyManager` interface provides `generateKey(keyId)`, `getKey(keyId)`, `destroyKey(keyId)`, `isKeyActive(keyId)`, and `isKeyDestroyed(keyId)`.
+   - Default implementation `InMemoryKeyManager` is software-backed for prototype validation and automated testing.
+   - **Explicit Prototype Limitations**: In-memory keys are volatile and wiped on process restart; keys reside in JVM heap memory without hardware tamper resistance; storage is process-local and does not scale across clustered nodes; true production crypto-shredding requires master keys in an HSM or managed KMS (AWS KMS, HashiCorp Vault) whose lifecycle is independent of database backups and WAL archives.
+
+4. **Exactly-Once Logical Meta-Auditing, Transaction Boundaries & Reconciliation**:
+   - Every completed redaction appends an immutable `PAYLOAD_REDACTED` event to the chain, capturing coordinate metadata (`redactionOperationId`, `targetEventId`, `targetSequenceNo`, `fieldPath`, `reason`, `redactionType`, `keyId`) with **zero sensitive plaintext**.
+   - A deterministic `operation_id = "redact:" + event_id + ":" + field_path` ensures deduplication.
+   - Database uniqueness is strictly enforced by partial unique index `idx_audit_event_meta_redaction_op` on `audit_event ((payload->>'redactionOperationId')) WHERE event_type = 'PAYLOAD_REDACTED'`. Any attempt to insert a duplicate meta-event is rejected at the database engine level with SQLState `23505`.
+   - Transaction boundaries are managed via dedicated Spring collaborator `AuditRedactionCoordinator`. Before reconciliation discovery or meta-audit append, it acquires a pessimistic row lock with `SELECT ... FOR UPDATE` on `audit_event_redaction WHERE operation_id = ?`, holding the lock throughout the transaction.
+   - If another node or thread completes the operation while waiting on the row lock, the coordinator discovers the completed status and returns immediately without appending a duplicate.
+   - Pre-append reconciliation queries `audit_event` for an already-appended meta-event with `payload->>'redactionOperationId' = ?`. If discovered, the service links the existing sequence number to `audit_event_redaction.meta_audit_sequence_no` without appending a duplicate meta-event.
+
+5. **Database Enforcement of Immutability**:
+   - `audit_app` is granted narrow column privileges: `SELECT, INSERT` on all columns, `UPDATE (status, redacted_at, meta_audit_sequence_no)` only, and `USAGE, SELECT` on `audit_event_redaction_redaction_id_seq`.
+   - Attempts to update immutable metadata (`reason`, `requested_by`, `field_path`, `event_id`, etc.) fail with SQLState `42501 permission denied`.
+   - Lifecycle trigger `trg_audit_event_redaction_lifecycle` permanently seals completed records (`55000: record is sealed and immutable once COMPLETED`), validates state transitions (`PENDING -> KEY_DESTROYED -> COMPLETED`), and mandates a positive `meta_audit_sequence_no`.
+   - Delete trigger `trg_audit_event_redaction_no_delete` prohibits `DELETE` and `TRUNCATE` operations (`55000`).
+
+### Export bundles (Scenario B)
 
 An export includes selected canonical events, their hashes, a hash-only witness sequence between the first and last selected record, and the observed chain-head checkpoint. Recipients can recompute selected hashes and link continuity using the bundle.
 

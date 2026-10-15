@@ -4,17 +4,18 @@ This repository contains a Java 17 and Spring Boot 3 prototype for the Audit Log
 
 ## Current milestone
 
-Milestone 9 is implemented (changes uncommitted locally pending review). The application implements Scenario B retention and soft-archival metadata management, Flyway V3 schema migration, atomic and idempotent single-event and batch archival endpoints, configurable retention window, query filtering (`includeArchived`), and complete-chain verification preservation:
+Milestone 10 is implemented (changes uncommitted locally pending review). The application implements Scenario B structured payload redaction, envelope crypto-shredding via pluggable `KeyManager`, Flyway V4 schema migration with immutable state triggers, read-time masking projections, sanitized `PAYLOAD_REDACTED` meta-audit events, exactly-once pre-append reconciliation discovery, and complete-chain verification preservation:
 - `POST /audit/events`: requires role `AUDIT_WRITER`
+- `POST /audit/events/{eventId}/redact`: requires role `AUDIT_WRITER`
 - `POST /audit/archive/{eventId}`: requires role `AUDIT_WRITER`
 - `POST /audit/archive/eligible`: requires role `AUDIT_WRITER`
 - `GET /audit/events`: requires role `AUDITOR`
 - `GET /audit/verify`: requires role `AUDITOR`
 - All other routes are denied by default.
 
-Unauthenticated requests receive a sanitized HTTP 401 `ErrorResponse` preserving the `WWW-Authenticate: Basic realm="AuditLogService"` header. Insufficiently privileged requests receive a sanitized HTTP 403 `ErrorResponse`. Milestone 8 (security and authentication) is committed locally as `d69a172`, Milestone 7 (`GET /audit/verify`) is committed as `01d5460`, Milestone 6 (`GET /audit/events`) is committed as `b9739f0`, and Milestone 5 (`POST /audit/events`) is committed as `53d5bcb`.
+Unauthenticated requests receive a sanitized HTTP 401 `ErrorResponse` preserving the `WWW-Authenticate: Basic realm="AuditLogService"` header. Insufficiently privileged requests receive a sanitized HTTP 403 `ErrorResponse`. Milestone 9 (retention and archival) is committed locally as `ba10b37`, Milestone 8 (security and authentication) is committed as `d69a172`, Milestone 7 (`GET /audit/verify`) is committed as `01d5460`, Milestone 6 (`GET /audit/events`) is committed as `b9739f0`, and Milestone 5 (`POST /audit/events`) is committed as `53d5bcb`.
 
-Subsequent milestones will add remaining Scenario B payload redaction workflows and verifiable export bundles (`GET /audit/exports`).
+Subsequent milestones will add remaining Scenario B verifiable export bundles (`GET /audit/exports`).
 
 ## Prerequisites
 
@@ -26,13 +27,13 @@ The test suite runs against Java 17. Use a Java 17 JDK when validating this proj
 
 ## Build and test
 
-Run the full suite of 177 unit and integration tests:
+Run the full suite of 205 unit and integration tests:
 
 ```bash
 mvn test
 ```
 
-The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 17 database migration tests, 1 application context test, 18 append WebMvc controller slice tests, 7 append end-to-end HTTP/database integration tests, 10 query WebMvc controller slice tests, 13 query end-to-end HTTP/database integration tests, 3 verify WebMvc controller slice tests, 16 verify/tamper end-to-end HTTP/database integration tests, 18 security/authorization end-to-end HTTP/database integration tests, 7 security credential validation unit/context tests, 5 archival WebMvc controller slice tests, 6 retention configuration validation tests, and 9 archival service/database integration tests.
+The suite includes 29 canonical hashing unit tests with independent vectors, 18 append integration tests with isolated Testcontainers PostgreSQL, 21 database migration tests, 1 application context test, 18 append WebMvc controller slice tests, 7 append end-to-end HTTP/database integration tests, 10 query WebMvc controller slice tests, 14 query end-to-end HTTP/database integration tests, 3 verify WebMvc controller slice tests, 16 verify/tamper end-to-end HTTP/database integration tests, 21 security/authorization end-to-end HTTP/database integration tests, 7 security credential validation unit/context tests, 5 archival WebMvc controller slice tests, 6 retention configuration validation tests, 9 archival service/database integration tests, 5 crypto unit tests, 6 redaction WebMvc controller slice tests, and 9 redaction service/database integration tests.
 
 ## Local PostgreSQL
 

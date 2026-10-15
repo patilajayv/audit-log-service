@@ -69,7 +69,7 @@ This document separates assignment requirements from engineering choices. "Requi
 ### Requirements
 
 - Records older than a configurable retention window must be archivable or soft-deletable without false chain failures. *(Implemented and verified in Milestone 9)*
-- Sensitive payload fields must be redactable without breaking tamper evidence.
+- Sensitive payload fields must be redactable without breaking tamper evidence. *(Implemented and verified in Milestone 10)*
 - Export all records for an `actorId` or `resourceId` as a self-contained verifiable bundle.
 - Document the redaction design, alternatives, limitations, and trade-offs.
 
@@ -77,22 +77,33 @@ This document separates assignment requirements from engineering choices. "Requi
 
 - The prototype retains immutable event evidence while presenting archived and redacted read projections.
 - Archival status is managed via separate metadata (`audit_event_archive`) created in Flyway migration V3.
+- Redaction metadata and state transitions are managed via separate metadata (`audit_event_redaction`) created in Flyway migration V4.
 
 ### Recommendations and implementation decisions
 
 - **Retention via soft archival**: Implemented with separate `audit_event_archive` metadata keyed by `event_id` (PK FK to `audit_event.event_id`). Archiving an event never mutates or deletes rows in `audit_event`.
 - **Configurable retention window**: Configured via `audit.retention.window-days`. Safe defaults are provided for `local` (90 days) and `test` (30 days); production environments strictly require an explicit positive value ($> 0$), validated at application startup.
 - **Atomic, idempotent archival endpoints**: `POST /audit/archive/{eventId}` for targeted single-event archival and `POST /audit/archive/eligible` for batch archival of records older than the cutoff ($now - windowDays$). Both endpoints use `ON CONFLICT (event_id) DO NOTHING` for idempotent retry safety and are restricted to `AUDIT_WRITER`.
-- **Preserved global verification**: `GET /audit/verify` streams directly from `audit_event` and validates 100% of events from genesis to chain head, guaranteeing zero false-positive chain failures for legitimately archived events.
+- **Preserved global verification**: `GET /audit/verify` streams directly from `audit_event` and validates 100% of events from genesis to chain head, guaranteeing zero false-positive chain failures for legitimately archived or redacted events.
 - **Default query exclusion**: `GET /audit/events` omits archived records by default (`includeArchived=false`). Callers requesting `includeArchived=true` receive active and archived records with `archivedAt` populated.
-- **Payload redaction**: Sensitive fields will be represented as encrypted payload envelopes before the event is hashed. Redaction disables or destroys the referenced decryption key and returns a redacted projection.
+- **Structured payload redaction (Option A Pluggable KeyManager)**:
+  - Sensitive payload fields can be wrapped in an `EncryptedEnvelope` (AES-256-GCM) at ingestion.
+  - Dedicated endpoint `POST /audit/events/{eventId}/redact`, restricted to `AUDIT_WRITER`.
+  - For encrypted envelopes, invokes `KeyManager.destroyKey(keyId)` for true cryptographic erasure (crypto-shredding, `redaction_type = 'CRYPTO_SHREDDED'`).
+  - For legacy plaintext events (Milestones 1–9), soft-masking is registered (`redaction_type = 'MASKED'`) without touching historical database records.
+  - Appends an immutable `PAYLOAD_REDACTED` meta-audit event with coordinate metadata and **zero sensitive plaintext**.
+  - Exactly-once logical meta-auditing is enforced via durable `operation_id = "redact:" + event_id + ":" + field_path` and pre-append reconciliation discovery against `audit_event ((payload->>'redactionOperationId'))`, ensuring network retries or crashes never duplicate meta-events.
+  - Database enforcement (Flyway V4): column-level grants restrict `audit_app` to `UPDATE (status, redacted_at, meta_audit_sequence_no)` only; lifecycle triggers prevent metadata tampering and permanently seal records once `COMPLETED`; delete triggers prohibit `DELETE` and `TRUNCATE`.
+  - Prototype key management: `InMemoryKeyManager` software implementation is provided strictly for test/prototype validation; its production limitations (in-memory volatility, JVM heap scraping, lack of HSM isolation) are explicitly documented.
+  - Read projection masking: `GET /audit/events` masks completed redacted fields with `"[REDACTED]"` while preserving original `contentHash` and `recordHash`.
 - **Verifiable export bundle**: The export bundle will include selected full records and hash-only witness records needed to establish continuity between the first and last selected sequence, alongside the observed chain-head checkpoint.
 
 ### Acceptance criteria
 
 - Archiving does not alter verification of the complete chain. *(Verified in `AuditVerificationIntegrationTests` and `AuditArchivalServiceIntegrationTests`)*
 - Normal queries omit archived events by default, but expose them with `archivedAt` when explicitly requested. *(Verified in `AuditQueryIntegrationTests`)*
-- A redacted response never exposes protected plaintext, while the original ciphertext envelope remains verifiable.
+- A redacted response never exposes protected plaintext, while the original ciphertext envelope remains verifiable and `GET /audit/verify` returns `INTACT`. *(Verified in `AuditRedactionServiceIntegrationTests`)*
+- Retrying redaction is idempotent and never creates duplicate meta-audit events. *(Verified in `AuditRedactionServiceIntegrationTests`)*
 - An exported bundle verifies selected event content and chain continuity using only its contents, subject to the trusted-anchor limitation recorded below.
 
 ## Scenario C: Compliance Reporting
