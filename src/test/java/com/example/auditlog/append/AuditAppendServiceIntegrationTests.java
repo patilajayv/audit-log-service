@@ -368,6 +368,134 @@ class AuditAppendServiceIntegrationTests {
     }
 
     // -------------------------------------------------------------------------
+    // Idempotency & Replay Integration Tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    void sameKeyIdenticalReplayReturnsOriginalCommittedEventWithoutDuplicate() {
+        AppendEventRequest request = loginRequest(emptyPayload());
+
+        AppendEventResult first = inTransaction(() ->
+                appendService.appendWithIdempotency(request, "writer-client-1", "idemp-key-1"));
+        assertThat(first.isReplay()).isFalse();
+        assertThat(first.sequenceNo()).isEqualTo(1L);
+
+        // Immediate identical replay with same client and key
+        AppendEventResult second = inTransaction(() ->
+                appendService.appendWithIdempotency(request, "writer-client-1", "idemp-key-1"));
+
+        assertThat(second.isReplay()).isTrue();
+        assertThat(second.eventId()).isEqualTo(first.eventId());
+        assertThat(second.sequenceNo()).isEqualTo(first.sequenceNo());
+        assertThat(second.contentHash()).isEqualTo(first.contentHash());
+        assertThat(second.recordHash()).isEqualTo(first.recordHash());
+
+        // Event count and chain head must remain exactly 1
+        assertThat(queryEventCount()).isEqualTo(1L);
+        assertChainHead(1L);
+    }
+
+    @Test
+    void sameKeyConflictingPayloadThrowsIdempotencyConflictException() {
+        ObjectNode payload1 = MAPPER.createObjectNode().put("amount", "100.00");
+        AppendEventRequest request1 = new AppendEventRequest("WIRE", "actor-1", "ACCOUNT", "res-1", payload1, null);
+
+        inTransaction(() -> appendService.appendWithIdempotency(request1, "writer-client-1", "idemp-key-conflict"));
+        assertThat(queryEventCount()).isEqualTo(1L);
+
+        ObjectNode payload2 = MAPPER.createObjectNode().put("amount", "9999.00");
+        AppendEventRequest request2 = new AppendEventRequest("WIRE", "actor-1", "ACCOUNT", "res-1", payload2, null);
+
+        assertThatThrownBy(() -> inTransaction(() ->
+                appendService.appendWithIdempotency(request2, "writer-client-1", "idemp-key-conflict")))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("idemp-key-conflict")
+                .hasMessageContaining("different request payload");
+
+        // Event count remains 1
+        assertThat(queryEventCount()).isEqualTo(1L);
+        assertChainHead(1L);
+    }
+
+    @Test
+    void differentPrincipalsCanUseSameIdempotencyKeyIndependently() {
+        AppendEventRequest request = loginRequest(emptyPayload());
+
+        AppendEventResult clientA = inTransaction(() ->
+                appendService.appendWithIdempotency(request, "client-alpha", "shared-key-999"));
+        AppendEventResult clientB = inTransaction(() ->
+                appendService.appendWithIdempotency(request, "client-beta", "shared-key-999"));
+
+        assertThat(clientA.sequenceNo()).isEqualTo(1L);
+        assertThat(clientB.sequenceNo()).isEqualTo(2L);
+        assertThat(clientA.eventId()).isNotEqualTo(clientB.eventId());
+
+        // Both committed independently
+        assertThat(queryEventCount()).isEqualTo(2L);
+        assertChainHead(2L);
+    }
+
+    @Test
+    void concurrentDuplicateRequestsWithSameKeyCommitExactlyOneEvent() throws Exception {
+        int threads = 5;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        AppendEventRequest request = loginRequest(emptyPayload());
+
+        try {
+            List<Future<AppendEventResult>> futures = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                futures.add(executor.submit(() -> inTransaction(() ->
+                        appendService.appendWithIdempotency(request, "concurrent-writer", "same-concurrent-key"))));
+            }
+
+            List<AppendEventResult> results = new ArrayList<>();
+            for (Future<AppendEventResult> f : futures) {
+                results.add(f.get(CONCURRENCY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
+            }
+
+            // Exactly 1 event row must have been created in the database
+            assertThat(queryEventCount()).isEqualTo(1L);
+            assertChainHead(1L);
+
+            // All 5 threads must have received the exact same committed eventId and recordHash
+            UUID expectedEventId = results.get(0).eventId();
+            String expectedRecordHash = results.get(0).recordHash();
+            for (AppendEventResult res : results) {
+                assertThat(res.eventId()).isEqualTo(expectedEventId);
+                assertThat(res.sequenceNo()).isEqualTo(1L);
+                assertThat(res.recordHash()).isEqualTo(expectedRecordHash);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(CONCURRENCY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void transactionRollbackLeavesIdempotencyTableClean() {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        AppendEventRequest request = loginRequest(emptyPayload());
+
+        // Attempt an append inside a transaction that is explicitly rolled back
+        try {
+            inTransaction(() -> {
+                appendService.appendWithIdempotency(request, "rollback-writer", "rollback-key");
+                throw new RuntimeException("Simulated mid-transaction failure");
+            });
+        } catch (Exception expected) {
+            // Expected rollback
+        }
+
+        assertThat(queryEventCount()).isEqualTo(0L);
+        assertChainHead(0L);
+
+        Long idempotencyRowCount = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_idempotency_key WHERE idempotency_key = 'rollback-key'",
+                Long.class);
+        assertThat(idempotencyRowCount).isEqualTo(0L);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 

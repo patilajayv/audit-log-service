@@ -38,7 +38,12 @@ import org.springframework.test.web.servlet.MockMvc;
  * WebMvc slice tests for {@code GET /audit/events} validating HTTP query contracts,
  * parameter mapping, pagination defaults, input validation, error handling, and response schema.
  */
-@WebMvcTest(AuditEventController.class)
+@WebMvcTest(
+        controllers = AuditEventController.class,
+        properties = {
+                "audit.rate-limit.enabled=false"
+        }
+)
 @Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class, SecurityConfiguration.class})
 @WithMockUser(username = "test-auditor", roles = "AUDITOR")
 class AuditEventQueryControllerWebMvcTest {

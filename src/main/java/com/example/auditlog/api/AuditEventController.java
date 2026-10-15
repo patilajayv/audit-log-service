@@ -10,11 +10,15 @@ import com.example.auditlog.query.AuditQueryCriteria;
 import com.example.auditlog.query.AuditQueryService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -23,7 +27,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * REST controller for writing and querying immutable audit events.
+ * REST controller for writing and querying immutable audit events with idempotent replay protection.
  *
  * <p>Enforces strict input validation, privacy safeguards (no sensitive payload/ID logging),
  * deterministic sequence-ordered pagination, and returns committed events with cryptographic hashes.
@@ -33,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuditEventController {
 
     private static final Logger log = LoggerFactory.getLogger(AuditEventController.class);
+    private static final Pattern VALID_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9_.:\\-]{1,256}$");
 
     private final AuditAppendService appendService;
     private final AuditQueryService queryService;
@@ -49,17 +54,6 @@ public class AuditEventController {
 
     /**
      * Queries committed audit events matching the provided filter criteria with stable pagination.
-     *
-     * @param actorId optional filter by actor identifier
-     * @param resourceType optional filter by resource type
-     * @param resourceId optional filter by resource identifier
-     * @param eventType optional filter by event type
-     * @param from optional ISO-8601 start timestamp against service recorded_at (inclusive)
-     * @param to optional ISO-8601 end timestamp against service recorded_at (inclusive)
-     * @param page zero-based page index (default 0)
-     * @param size page size (default 20, max 100)
-     * @param httpRequest HTTP servlet request for correlation tracing
-     * @return 200 OK with page results ordered monotonically by sequence_no ASC
      */
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AuditPageResponse<AuditEventDto>> queryEvents(
@@ -85,11 +79,11 @@ public class AuditEventController {
     }
 
     /**
-     * Appends a validated audit event to the tamper-evident hash chain.
+     * Appends a validated audit event to the tamper-evident hash chain with optional idempotency protection.
      *
      * @param request the validated event request
-     * @param httpRequest HTTP servlet request for correlation tracing
-     * @return 201 Created with the assigned event ID, sequence number, and hashes
+     * @param httpRequest HTTP servlet request for correlation tracing and header inspection
+     * @return 201 Created on fresh append, or 200 OK on identical replay
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AuditEventResponse> appendEvent(
@@ -97,9 +91,16 @@ public class AuditEventController {
             HttpServletRequest httpRequest) {
 
         String correlationId = resolveCorrelationId(httpRequest);
-        log.debug("Processing audit append request: correlationId={}", correlationId);
+        String clientId = resolveClientId();
 
-        AppendEventResult result = appendService.append(request);
+        String canonicalKey = httpRequest.getHeader("Idempotency-Key");
+        String fallbackKey = httpRequest.getHeader("X-Idempotency-Key");
+        String idempotencyKey = resolveAndValidateIdempotencyKey(canonicalKey, fallbackKey);
+
+        log.debug("Processing audit append request: correlationId={}, clientId={}, idempotencyKey={}",
+                correlationId, clientId, idempotencyKey);
+
+        AppendEventResult result = appendService.appendWithIdempotency(request, clientId, idempotencyKey);
 
         AuditEventResponse response = new AuditEventResponse(
                 result.eventId(),
@@ -109,10 +110,54 @@ public class AuditEventController {
                 result.previousHash(),
                 result.recordHash());
 
+        if (result.isReplay()) {
+            log.info("Idempotent replay detected: eventId={}, sequenceNo={}, correlationId={}",
+                    result.eventId(), result.sequenceNo(), correlationId);
+            return ResponseEntity.status(HttpStatus.OK).body(response);
+        }
+
         log.info("Audit event committed successfully: eventId={}, sequenceNo={}, correlationId={}",
                 result.eventId(), result.sequenceNo(), correlationId);
 
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    private String resolveAndValidateIdempotencyKey(String canonicalKey, String fallbackKey) {
+        if (canonicalKey != null && fallbackKey != null && !canonicalKey.equals(fallbackKey)) {
+            throw new IllegalArgumentException(
+                    "Conflicting idempotency headers provided: Idempotency-Key and X-Idempotency-Key must match");
+        }
+
+        String rawKey = (canonicalKey != null) ? canonicalKey : fallbackKey;
+        if (rawKey == null) {
+            return null;
+        }
+
+        if (rawKey.isBlank()) {
+            throw new IllegalArgumentException("Idempotency-Key header must not be blank");
+        }
+
+        if (rawKey.length() > 256) {
+            throw new IllegalArgumentException("Idempotency-Key exceeds maximum allowed length of 256 characters");
+        }
+
+        if (!VALID_KEY_PATTERN.matcher(rawKey).matches()) {
+            throw new IllegalArgumentException(
+                    "Idempotency-Key contains invalid characters. Permitted characters are alphanumeric, '.', '-', '_', and ':'");
+        }
+
+        return rawKey;
+    }
+
+    private String resolveClientId() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.isAuthenticated() && !(auth instanceof AnonymousAuthenticationToken)) {
+            String name = auth.getName();
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+        return "anonymous";
     }
 
     private String resolveCorrelationId(HttpServletRequest request) {

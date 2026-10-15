@@ -38,7 +38,12 @@ import org.springframework.test.web.servlet.MockMvc;
  * input validation, duplicate key detection, request-size limits (HTTP 413),
  * timestamp normalization, error sanitization, and status codes.
  */
-@WebMvcTest(AuditEventController.class)
+@WebMvcTest(
+        controllers = AuditEventController.class,
+        properties = {
+                "audit.rate-limit.enabled=false"
+        }
+)
 @Import({AuditLogConfiguration.class, AuditControllerAdvice.class, AuditHashService.class, SecurityConfiguration.class})
 @WithMockUser(username = "test-writer", roles = "AUDIT_WRITER")
 class AuditEventControllerWebMvcTest {
@@ -60,9 +65,12 @@ class AuditEventControllerWebMvcTest {
 
     @BeforeEach
     void setUp() {
+        AppendEventResult defaultResult = new AppendEventResult(
+                EVENT_ID, 1L, RECORDED_AT, CONTENT_HASH, PREVIOUS_HASH, RECORD_HASH, false);
         when(appendService.append(any(AppendEventRequest.class)))
-                .thenReturn(new AppendEventResult(
-                        EVENT_ID, 1L, RECORDED_AT, CONTENT_HASH, PREVIOUS_HASH, RECORD_HASH));
+                .thenReturn(defaultResult);
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
+                .thenReturn(defaultResult);
     }
 
     // -------------------------------------------------------------------------
@@ -115,7 +123,7 @@ class AuditEventControllerWebMvcTest {
                 .andExpect(status().isCreated());
 
         ArgumentCaptor<AppendEventRequest> captor = ArgumentCaptor.forClass(AppendEventRequest.class);
-        verify(appendService).append(captor.capture());
+        verify(appendService).appendWithIdempotency(captor.capture(), any(), any());
         assertThat(captor.getValue().sourceTimestamp()).isNull();
     }
 
@@ -139,7 +147,7 @@ class AuditEventControllerWebMvcTest {
                 .andExpect(status().isCreated());
 
         ArgumentCaptor<AppendEventRequest> captor = ArgumentCaptor.forClass(AppendEventRequest.class);
-        verify(appendService).append(captor.capture());
+        verify(appendService).appendWithIdempotency(captor.capture(), any(), any());
         assertThat(captor.getValue().sourceTimestamp()).isEqualTo(Instant.parse("2026-10-15T02:00:00.123Z"));
     }
 
@@ -290,7 +298,7 @@ class AuditEventControllerWebMvcTest {
 
     @Test
     void rejectsUnsafeIntegerInPayload() throws Exception {
-        when(appendService.append(any(AppendEventRequest.class)))
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
                 .thenThrow(new IllegalArgumentException(
                         "Integer 9007199254740993 is outside safe IEEE-754 range [-(2^53-1), 2^53-1]; encode as string per RFC 8785 Appendix D / RFC 7493"));
 
@@ -411,7 +419,7 @@ class AuditEventControllerWebMvcTest {
 
     @Test
     void returns503WithRetryAfterOnChainHeadLockContention() throws Exception {
-        when(appendService.append(any(AppendEventRequest.class)))
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
                 .thenThrow(new CannotAcquireLockException("Lock wait timeout exceeded (55P03)"));
 
         String json = """
@@ -435,7 +443,7 @@ class AuditEventControllerWebMvcTest {
 
     @Test
     void sanitizesDatabaseErrorWithoutLeakingInternalDetailsOrSql() throws Exception {
-        when(appendService.append(any(AppendEventRequest.class)))
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
                 .thenThrow(new DataIntegrityViolationException(
                         "ERROR: duplicate key value violates unique constraint audit_event_event_id_key\n"
                         + "Detail: Key (event_id)=(...) already exists in table audit_event."));
@@ -471,5 +479,201 @@ class AuditEventControllerWebMvcTest {
                 .andExpect(status().isUnsupportedMediaType())
                 .andExpect(jsonPath("$.status").value(415))
                 .andExpect(jsonPath("$.message").value("Content-Type must be application/json"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Idempotency & Replay Protection Tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    void appendWithIdempotencyKeyReturns201CreatedOnNewEvent() throws Exception {
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
+                .thenReturn(new AppendEventResult(
+                        EVENT_ID, 1L, RECORDED_AT, CONTENT_HASH, PREVIOUS_HASH, RECORD_HASH, false));
+
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "tx-key-1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.eventId").value(EVENT_ID.toString()))
+                .andExpect(jsonPath("$.sequenceNo").value(1))
+                .andExpect(jsonPath("$.contentHash").value(CONTENT_HASH));
+    }
+
+    @Test
+    void appendWithIdempotencyKeyReturns200OkOnIdenticalReplay() throws Exception {
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
+                .thenReturn(new AppendEventResult(
+                        EVENT_ID, 1L, RECORDED_AT, CONTENT_HASH, PREVIOUS_HASH, RECORD_HASH, true));
+
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "tx-key-1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.eventId").value(EVENT_ID.toString()))
+                .andExpect(jsonPath("$.sequenceNo").value(1))
+                .andExpect(jsonPath("$.contentHash").value(CONTENT_HASH));
+    }
+
+    @Test
+    void appendWithFallbackHeaderXIdempotencyKeyReturns200OkOnReplay() throws Exception {
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
+                .thenReturn(new AppendEventResult(
+                        EVENT_ID, 1L, RECORDED_AT, CONTENT_HASH, PREVIOUS_HASH, RECORD_HASH, true));
+
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("X-Idempotency-Key", "tx-key-fallback")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.eventId").value(EVENT_ID.toString()));
+    }
+
+    @Test
+    void appendWithIdempotencyKeyReturns409ConflictOnPayloadMismatch() throws Exception {
+        when(appendService.appendWithIdempotency(any(AppendEventRequest.class), any(), any()))
+                .thenThrow(new com.example.auditlog.append.IdempotencyConflictException(
+                        "tx-key-1001",
+                        "Idempotency key 'tx-key-1001' has already been used with a different request payload"));
+
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "50000.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "tx-key-1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.error").value("Conflict"))
+                .andExpect(jsonPath("$.message").value(
+                        "Idempotency key 'tx-key-1001' has already been used with a different request payload"));
+    }
+
+    @Test
+    void appendWithBlankIdempotencyKeyReturns400BadRequest() throws Exception {
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "   ")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Idempotency-Key header must not be blank"));
+    }
+
+    @Test
+    void appendWithOversizedIdempotencyKeyReturns400BadRequest() throws Exception {
+        String oversizedKey = "k".repeat(257);
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", oversizedKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value("Idempotency-Key exceeds maximum allowed length of 256 characters"));
+    }
+
+    @Test
+    void appendWithMalformedIdempotencyKeyReturns400BadRequest() throws Exception {
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "key with invalid spaces")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        "Idempotency-Key contains invalid characters. Permitted characters are alphanumeric, '.', '-', '_', and ':'"));
+    }
+
+    @Test
+    void appendWithConflictingIdempotencyHeadersReturns400BadRequest() throws Exception {
+        String json = """
+                {
+                    "eventType": "WIRE_TRANSFERRED",
+                    "actorId": "teller-44",
+                    "resourceType": "ACCOUNT",
+                    "resourceId": "ACCT-987654",
+                    "payload": {"amount": "100.00"}
+                }
+                """;
+
+        mockMvc.perform(post("/audit/events")
+                        .header("Idempotency-Key", "key-alpha")
+                        .header("X-Idempotency-Key", "key-beta")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message").value(
+                        "Conflicting idempotency headers provided: Idempotency-Key and X-Idempotency-Key must match"));
     }
 }

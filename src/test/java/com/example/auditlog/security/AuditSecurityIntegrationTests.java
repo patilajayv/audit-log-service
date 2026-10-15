@@ -20,6 +20,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -48,7 +50,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * </ul>
  */
 @Testcontainers(disabledWithoutDocker = true)
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = {
+                "audit.rate-limit.ip-burst-capacity=1000",
+                "audit.rate-limit.principal-burst-capacity=1000"
+        }
+)
 class AuditSecurityIntegrationTests {
 
     private static final String VALID_EVENT_JSON = """
@@ -87,6 +95,9 @@ class AuditSecurityIntegrationTests {
 
     @Autowired
     private Flyway flyway;
+
+    @Autowired
+    private ApplicationContext applicationContext;
 
     @BeforeEach
     void cleanAndMigrate() {
@@ -632,5 +643,109 @@ class AuditSecurityIntegrationTests {
         assertThat(currentEventCount).isEqualTo(initialEventCount);
         assertThat(currentHeadSeq).isEqualTo(initialHeadSeq);
         assertThat(currentHeadHash).isEqualTo(initialHeadHash);
+    }
+
+    @Test
+    @DisplayName("Idempotent append returns 201 on first call and 200 on identical replay via HTTP")
+    void idempotentAppend_returns201Then200OnReplay() {
+        String payload = """
+                {
+                    "eventType": "AUTH_LOGIN",
+                    "actorId": "security-user-1",
+                    "resourceType": "PORTAL",
+                    "resourceId": "portal-main",
+                    "payload": {"method": "CERTIFICATE"}
+                }
+                """;
+
+        HttpHeaders headers = jsonHeaders();
+        headers.set("Idempotency-Key", "sec-test-key-1");
+        HttpEntity<String> request = new HttpEntity<>(payload, headers);
+
+        // First call: 201 Created
+        ResponseEntity<AuditEventResponse> first = restTemplate.withBasicAuth("test-writer", "test-writer-password-123")
+                .postForEntity("/audit/events", request, AuditEventResponse.class);
+
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(first.getBody()).isNotNull();
+        UUID eventId = first.getBody().eventId();
+
+        // Second call with same key: 200 OK with identical event
+        ResponseEntity<AuditEventResponse> second = restTemplate.withBasicAuth("test-writer", "test-writer-password-123")
+                .postForEntity("/audit/events", request, AuditEventResponse.class);
+
+        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(second.getBody()).isNotNull();
+        assertThat(second.getBody().eventId()).isEqualTo(eventId);
+        assertThat(second.getBody().recordHash()).isEqualTo(first.getBody().recordHash());
+
+        // Event count in database must be exactly 1
+        Integer currentEventCount = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM audit_event", Integer.class);
+        assertThat(currentEventCount).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Idempotent append with mismatched payload returns 409 Conflict via HTTP")
+    void idempotentAppend_withMismatchedPayloadReturns409Conflict() {
+        String payload1 = """
+                {
+                    "eventType": "AUTH_LOGIN",
+                    "actorId": "security-user-1",
+                    "resourceType": "PORTAL",
+                    "resourceId": "portal-main",
+                    "payload": {"method": "CERTIFICATE"}
+                }
+                """;
+
+        HttpHeaders headers = jsonHeaders();
+        headers.set("Idempotency-Key", "sec-test-conflict-key");
+        HttpEntity<String> request1 = new HttpEntity<>(payload1, headers);
+
+        ResponseEntity<AuditEventResponse> first = restTemplate.withBasicAuth("test-writer", "test-writer-password-123")
+                .postForEntity("/audit/events", request1, AuditEventResponse.class);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+        String payload2 = """
+                {
+                    "eventType": "AUTH_LOGIN",
+                    "actorId": "security-user-1",
+                    "resourceType": "PORTAL",
+                    "resourceId": "portal-main",
+                    "payload": {"method": "PASSWORD_COMPROMISED"}
+                }
+                """;
+        HttpEntity<String> request2 = new HttpEntity<>(payload2, headers);
+
+        ResponseEntity<ErrorResponse> second = restTemplate.withBasicAuth("test-writer", "test-writer-password-123")
+                .postForEntity("/audit/events", request2, ErrorResponse.class);
+
+        assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(second.getBody()).isNotNull();
+        assertThat(second.getBody().status()).isEqualTo(409);
+        assertThat(second.getBody().message()).contains("sec-test-conflict-key");
+    }
+
+    // =========================================================================
+    // Rate Limiting Servlet Registration Invariants
+    // =========================================================================
+
+    @Test
+    @DisplayName("FilterRegistrationBean beans for rate limiters are explicitly disabled from servlet container auto-registration")
+    void rateLimitingFilterBeans_disabledInServletContainer() {
+        FilterRegistrationBean<?> ipRegistration = applicationContext.getBean(
+                "preAuthIpRateLimitingFilterRegistration", FilterRegistrationBean.class);
+        FilterRegistrationBean<?> principalRegistration = applicationContext.getBean(
+                "postAuthPrincipalRateLimitingFilterRegistration", FilterRegistrationBean.class);
+
+        assertThat(ipRegistration).isNotNull();
+        assertThat(ipRegistration.isEnabled())
+                .as("preAuthIpRateLimitingFilterRegistration must be disabled from servlet auto-registration")
+                .isFalse();
+
+        assertThat(principalRegistration).isNotNull();
+        assertThat(principalRegistration.isEnabled())
+                .as("postAuthPrincipalRateLimitingFilterRegistration must be disabled from servlet auto-registration")
+                .isFalse();
     }
 }
