@@ -255,11 +255,50 @@ The full Maven test suite passed under Java 17.0.16 with **203 tests run, 0 fail
   - `testExportExceedingMaxMatchedEventsReturns413`: confirms bounded export enforcement rejecting requests matching > `maxMatchedEvents` with HTTP 413 Payload Too Large.
   - `testExportExceedingMaxTotalRecordsReturns413`: confirms bounded export enforcement rejecting requests where total chain > `maxTotalRecords` with HTTP 413 Payload Too Large.
   - `testExportTransactionSnapshotConsistency`: confirms `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)` snapshot consistency.
-- **`AuditSecurityIntegrationTests` (24 tests, 3 new in Milestone 11)**:
+- **`AuditSecurityIntegrationTests` (38 tests, 14 new in Milestone 12)**:
   - `getExports_unauthenticated_returns401`: confirms HTTP 401 with `WWW-Authenticate` header.
   - `getExports_writerRole_returns403`: confirms `AUDIT_WRITER` role is rejected with HTTP 403 Forbidden.
   - `getExports_auditorRole_returns200`: confirms `AUDITOR` role is authorized (HTTP 200).
-- **Previous baseline tests (205 tests)**: All 205 previously existing tests continue to pass with 0 regressions. Total test suite now stands at **243 passing tests**.
+  - 8 compliance endpoint tests: `GET /audit/compliance/account-access` and `/export` return 401 unauthenticated, 403 `AUDIT_WRITER`, 200 `AUDITOR`, 200 `REGULATOR`.
+  - 6 regulator least-privilege tests: `ROLE_REGULATOR` receives 403 Forbidden on `/audit/events` (GET), `/audit/exports`, `/audit/verify`, `/audit/events` (POST), `/audit/archive/eligible`, and `/audit/events/{id}/redact`.
+- **Previous baseline tests (243 tests)**: All 243 previously existing tests continue to pass with 0 regressions. Total test suite now stands at **272 passing tests**.
+
+## Milestone 12 validation status
+
+Milestone 12 implemented Scenario C: Regulator Auditing of Client Account Data Access, introducing:
+1. `GET /audit/compliance/account-access`: Dedicated compliance query endpoint with mandatory `accountId`, server-side `resourceType = 'ACCOUNT'` isolation, default `includeArchived = true`, stable pagination by `sequence_no ASC`, and sanitized error translation.
+2. `GET /audit/compliance/account-access/export`: Dedicated server-side constrained export endpoint forcing `resourceType = 'ACCOUNT'` and `resourceId = accountId`, preventing non-account resource exposure.
+3. Fail-closed supervisory meta-auditing: Durably appends `REGULATORY_AUDIT_ACCESSED` and `REGULATORY_EXPORT_ACCESSED` records to `audit_event` prior to data disclosure; if append fails, the request terminates immediately with zero account data read or returned.
+4. Supervisory recursion & query isolation: Supervisory events use `resourceType = 'COMPLIANCE_AUDIT'`, isolating them completely from account queries and preventing feedback loops and pagination drift, while preserving full-chain verification (`GET /audit/verify`).
+5. Least-privilege role authorization: `ROLE_REGULATOR` is provisioned and restricted to compliance endpoints; general queries, exports, verification, write, archive, and redact endpoints return HTTP 403 Forbidden.
+6. Zero Flyway migrations: Preserved migrations V1–V4 untouched.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **272 tests run, 0 failures, 0 errors, and 0 skipped** across 23 test classes:
+
+- **`AuditComplianceControllerWebMvcTest` (7 tests, NEW in Milestone 12)**: MockMvc unit slice tests covering:
+  - `queryWithValidAccountIdReturns200`: Validates HTTP 200, parameter mapping, and response page structure.
+  - `queryWithMissingAccountIdReturns400`: Asserts missing `accountId` returns sanitized HTTP 400 Bad Request.
+  - `queryWithBlankAccountIdReturns400`: Asserts whitespace-only `accountId` returns HTTP 400.
+  - `exportWithValidAccountIdReturns200`: Validates HTTP 200 and export bundle structure.
+  - `exportWithMissingAccountIdReturns400`: Asserts missing `accountId` on export returns HTTP 400.
+  - `queryFailClosedLockContentionReturns503`: Asserts chain-head lock contention translates to HTTP 503 with `Retry-After: 1`.
+  - `queryFailClosedDatabaseErrorReturns500`: Asserts database error translates to sanitized generic HTTP 500 without leaking SQL.
+- **`AuditComplianceIntegrationTests` (6 tests, NEW in Milestone 12)**: End-to-end HTTP-to-database integration tests against Testcontainers PostgreSQL 16:
+  - `testQueryAccountAccessFiltersByAccountAndResourceType`: Confirms account filtering and `resourceType = 'ACCOUNT'` isolation, supervisory `REGULATORY_AUDIT_ACCESSED` append, and exclusion of supervisory events from subsequent query results (infinite loop prevention).
+  - `testQueryIncludesSoftArchivedEventsByDefault`: Confirms soft-archived account events are returned by default with `archivedAt` populated and excluded when `includeArchived = false`.
+  - `testQueryWithOptionalFilters`: Confirms `actorId` and `eventType` filtering.
+  - `testComplianceExportAndVerifiers`: Confirms compliance export produces a self-contained bundle verifying via Java `StandaloneExportVerifier` (`Status: INTACT`) and Python `scripts/verify_export.py` (`Status: INTACT`), and confirms supervisory `REGULATORY_EXPORT_ACCESSED` append.
+  - `testFullChainVerificationIntactAfterComplianceOperations`: Confirms full-chain verification (`GET /audit/verify`) remains `status: INTACT` across 100% of rows (business and supervisory events).
+  - `testRedactedAccountEventDisplaysMaskedProjection`: Confirms structured redaction (Milestone 10) displays `"[REDACTED]"` in query projection while accompanying `PAYLOAD_REDACTED` meta-event is returned.
+- **`AuditSecurityIntegrationTests` (38 tests, 14 new in Milestone 12)**:
+  - Validates authentication and authorization across all 4 caller states (unauthenticated, writer, auditor, regulator).
+  - Confirms `ROLE_REGULATOR` is granted access to `/audit/compliance/account-access` and `/export` (200 OK).
+  - Confirms `ROLE_REGULATOR` is forbidden (403 Forbidden) from `/audit/events` (GET), `/audit/exports`, `/audit/verify`, `/audit/events` (POST), `/audit/archive/eligible`, and `/audit/events/{id}/redact`.
+- **`SecurityCredentialValidationTests` (9 tests, 2 new in Milestone 12)**:
+  - Confirms production startup validation rejects missing regulator username and missing regulator password.
+- **Previous baseline tests (243 tests)**: All 243 previously existing tests continue to pass without regression.
 
 ## Prioritized backlog
 
@@ -274,7 +313,7 @@ The full Maven test suite passed under Java 17.0.16 with **203 tests run, 0 fail
 9. [x] Implement Scenario B configurable retention, soft archival (`POST /audit/archive/**`), Flyway V3 archive schema, and query filtering. (Milestone 9)
 10. [x] Implement Scenario B structured payload redaction (`POST /audit/events/{eventId}/redact`), pluggable `KeyManager`, AES-256-GCM envelopes, crypto-shredding, Flyway V4 redaction metadata/triggers, and query projection masking. (Milestone 10)
 11. [x] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains. (Milestone 11)
-12. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
+12. [x] Implement Scenario C regulator auditing of client account access, compliance query and constrained export endpoints, fail-closed supervisory auditing, and least-privilege authorization. (Milestone 12)
 13. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
 
 ## Milestone discipline

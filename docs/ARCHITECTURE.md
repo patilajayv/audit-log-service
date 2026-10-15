@@ -22,7 +22,9 @@
 | `POST /audit/archive/{eventId}` | Archives an individual event by ID. Idempotent (HTTP 200). Returns `ArchiveEventResult`. Returns HTTP 404 if event does not exist. | `AUDIT_WRITER` |
 | `POST /audit/archive/eligible` | Batch archives all events recorded before the configured retention cutoff window ($now - windowDays$). Idempotent (HTTP 200). Returns count of newly archived events and cutoff timestamp used. | `AUDIT_WRITER` |
 | `POST /audit/events/{eventId}/redact` | Redacts a sensitive field path within an event's payload. For encrypted envelopes, permanently destroys the DEK via `KeyManager.destroyKey` (crypto-shredding); for legacy plaintext, registers soft-masking. Appends an immutable `PAYLOAD_REDACTED` meta-audit event with zero sensitive plaintext. Idempotent with reconciliation discovery on retry. Returns `RedactionResult`. | `AUDIT_WRITER` |
-| `GET /audit/exports` | Scenario B endpoint. Requires exactly one of `actorId` or `resourceId`; returns a verifiable bundle. | `AUDITOR` |
+| `GET /audit/exports` | Scenario B endpoint. Requires exactly one of `actorId` or `resourceId`; returns a verifiable bundle. Restricted to internal auditors. | `AUDITOR` |
+| `GET /audit/compliance/account-access` | Scenario C endpoint. Requires `accountId`; filters strictly on `resourceType = 'ACCOUNT'`; defaults `includeArchived = true`. Commits fail-closed supervisory `REGULATORY_AUDIT_ACCESSED` event. | `REGULATOR`, `AUDITOR` |
+| `GET /audit/compliance/account-access/export` | Scenario C endpoint. Dedicated, server-side constrained export strictly for `resourceType = 'ACCOUNT'`. Commits fail-closed supervisory `REGULATORY_EXPORT_ACCESSED` event; returns independently verifiable bundle. | `REGULATOR`, `AUDITOR` |
 
 No `PUT`, `PATCH`, or `DELETE` audit-event endpoint will exist. Unauthenticated requests receive `401`; authenticated callers without the required role receive `403`.
 
@@ -339,6 +341,44 @@ The service provides `GET /audit/exports` (implemented by `AuditExportController
 6. **Security and Trust Boundaries**:
    - **Relative Trust Anchor**: The bundle's `chainHead` is an internal point-in-time database commitment. Detecting complete database history rewriting by a superuser requires an independently notarized external anchor.
    - **Inclusion vs. Completeness**: The bundle mathematically proves authenticity, tamper-evidence, and chain inclusion of all exported records. It cannot prove non-omission of matching records without disclosing intermediate third-party payloads or employing zero-knowledge set-membership proofs.
+
+### Compliance reporting and regulator auditing (Scenario C / Milestone 12)
+
+The service provides dedicated compliance reporting and export capabilities for external regulatory examiners (`ROLE_REGULATOR`):
+
+1. **Banking Data Plane vs. Audit Plane Separation**:
+   - The Audit Log Service does not hold live account balances or trading positions. It operates as the authoritative, tamper-evident *Audit Plane*.
+   - Upstream banking systems (e.g. branch teller apps, CRM, advisor portals, API gateways) emit standardized client account access events via `POST /audit/events` with `resourceType = 'ACCOUNT'` and `resourceId = accountId` (actions: `ACCOUNT_VIEWED`, `ACCOUNT_SEARCHED`, `STATEMENT_DOWNLOADED`, `ACCOUNT_EXPORTED`, `ACCOUNT_MODIFIED`, `ACCOUNT_ACCESS_DENIED`).
+
+2. **Regulator Export Isolation (Server-Side Enforcement)**:
+   - `ROLE_REGULATOR` is strictly denied access to general `GET /audit/exports` (HTTP 403 Forbidden).
+   - Regulatory exports use `GET /audit/compliance/account-access/export?accountId={accountId}`. The server requires non-blank `accountId` and forces `resourceType = 'ACCOUNT'`, ensuring examiners cannot export non-account resources or personal employee logs.
+   - Non-matching records (including supervisory events) are demoted to compact hash witnesses. The resulting bundle adheres to `ExportBundleDto` specification (`bundleVersion: "1.0"`) and is 100% verifiable independently using `StandaloneExportVerifier` (Java) and `scripts/verify_export.py` (Python).
+
+3. **Fail-Closed Supervisory Meta-Auditing**:
+   - Every examination query (`GET /audit/compliance/account-access`) commits a `REGULATORY_AUDIT_ACCESSED` event to the ledger; each export commits a `REGULATORY_EXPORT_ACCESSED` event.
+   - Supervisory events record examiner identity, requested account ID, query parameters, and correlation ID without leaking sensitive business payloads.
+   - **Fail-Closed Execution Policy**: The supervisory append transaction executes first. If the append fails (e.g. database lock contention or disk failure), execution terminates immediately with a sanitized HTTP 503/500 error; zero client account data is ever read or disclosed.
+
+4. **Supervisory Recursion & Query Isolation**:
+   - Supervisory events are assigned `resourceType = 'COMPLIANCE_AUDIT'`.
+   - Compliance queries strictly filter on `resourceType = 'ACCOUNT'`. Supervisory events never match the query predicate, preventing query feedback loops, pagination drift, or pollution of the client account's business access trail.
+   - Global chain verification (`GET /audit/verify`) walks 100% of rows from genesis to head regardless of resource type, guaranteeing unbroken hash-chain integrity.
+
+5. **Pagination Consistency & Multi-Request Stateless Reality**:
+   - Paginated queries operate under single-request `READ COMMITTED` transactions ordered monotonically by `sequence_no ASC`.
+   - New incoming events receive higher sequence numbers at the tail and never shift row offsets of previously retrieved pages.
+   - Frozen point-in-time snapshot consistency is provided by the compliance export endpoint under `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)`.
+
+6. **Least Privilege & Role-Based Authorization**:
+   - `ROLE_REGULATOR` is restricted to `/audit/compliance/account-access` and `/audit/compliance/account-access/export`.
+   - General internal audit queries (`/audit/events`), unrestricted exports (`/audit/exports`), chain verification (`/audit/verify`), and all mutation endpoints (`/audit/events` POST, `/audit/archive/**`, `/audit/events/*/redact`) return HTTP 403 Forbidden.
+   - Internal `ROLE_AUDITOR` retains access to all read, query, export, and verification endpoints. `ROLE_AUDIT_WRITER` is restricted to write, archive, and redact.
+
+7. **Documented Production Scope Boundaries**:
+   - *Subpoena / Matter Tracking*: In enterprise production, regulatory queries mandate an external subpoena or examination reference (e.g. `matterId = "SEC-EXAM-2026-04"`) in request headers.
+   - *Upstream Data Plane Ingestion*: Live banking gateways emit access events via distributed streaming pipelines (e.g. Apache Kafka) with dead-letter replay.
+   - *mTLS & PKI Federation*: Regulators authenticate via hardware-backed client certificate mTLS rather than HTTP Basic credentials.
 
 ## Threat model and limitations
 

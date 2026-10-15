@@ -13,6 +13,7 @@ public class SecurityUserProperties {
 
     private UserCredentials writer = new UserCredentials();
     private UserCredentials auditor = new UserCredentials();
+    private UserCredentials regulator = new UserCredentials();
 
     public UserCredentials getWriter() {
         return writer;
@@ -28,6 +29,14 @@ public class SecurityUserProperties {
 
     public void setAuditor(UserCredentials auditor) {
         this.auditor = auditor;
+    }
+
+    public UserCredentials getRegulator() {
+        return regulator;
+    }
+
+    public void setRegulator(UserCredentials regulator) {
+        this.regulator = regulator;
     }
 
     public static class UserCredentials {

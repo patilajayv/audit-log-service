@@ -13,11 +13,31 @@ import org.springframework.util.StringUtils;
 public record ExportFilterCriteria(
         FilterType filterType,
         String filterValue,
-        boolean includeArchived) {
+        boolean includeArchived,
+        String requiredResourceType) {
 
     public enum FilterType {
         ACTOR_ID,
         RESOURCE_ID
+    }
+
+    public ExportFilterCriteria(FilterType filterType, String filterValue, boolean includeArchived) {
+        this(filterType, filterValue, includeArchived, null);
+    }
+
+    /**
+     * Creates export filter criteria strictly constrained to client account data.
+     *
+     * @param accountId client account identifier (required, non-blank)
+     * @param includeArchived optional flag to include soft-archived events (defaults to true)
+     * @return constrained ExportFilterCriteria for account resources
+     */
+    public static ExportFilterCriteria forAccount(String accountId, Boolean includeArchived) {
+        if (accountId == null || !StringUtils.hasText(accountId)) {
+            throw new IllegalArgumentException("'accountId' is required and must not be blank");
+        }
+        boolean resolvedIncludeArchived = includeArchived == null || includeArchived;
+        return new ExportFilterCriteria(FilterType.RESOURCE_ID, accountId.trim(), resolvedIncludeArchived, "ACCOUNT");
     }
 
     public static ExportFilterCriteria of(String actorId, String resourceId, Boolean includeArchived) {
@@ -42,9 +62,9 @@ public record ExportFilterCriteria(
         boolean resolvedIncludeArchived = includeArchived == null || includeArchived;
 
         if (hasActor) {
-            return new ExportFilterCriteria(FilterType.ACTOR_ID, actorId.trim(), resolvedIncludeArchived);
+            return new ExportFilterCriteria(FilterType.ACTOR_ID, actorId.trim(), resolvedIncludeArchived, null);
         } else {
-            return new ExportFilterCriteria(FilterType.RESOURCE_ID, resourceId.trim(), resolvedIncludeArchived);
+            return new ExportFilterCriteria(FilterType.RESOURCE_ID, resourceId.trim(), resolvedIncludeArchived, null);
         }
     }
 }

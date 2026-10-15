@@ -10,5 +10,8 @@ audit:
     auditor:
       username: ${AUDIT_SECURITY_AUDITOR_USERNAME:}
       password: ${AUDIT_SECURITY_AUDITOR_PASSWORD:}
+    regulator:
+      username: ${AUDIT_SECURITY_REGULATOR_USERNAME:}
+      password: ${AUDIT_SECURITY_REGULATOR_PASSWORD:}
   retention:
     window-days: ${AUDIT_RETENTION_WINDOW_DAYS:}

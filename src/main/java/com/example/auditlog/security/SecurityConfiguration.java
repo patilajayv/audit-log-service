@@ -43,7 +43,8 @@ public class SecurityConfiguration {
 
     private static final Set<String> INSECURE_PASSWORDS = Set.of(
             "password", "changeme", "admin", "secret", "writer-secret", "auditor-secret",
-            "local-writer-secret-password", "local-auditor-secret-password"
+            "regulator-secret", "local-writer-secret-password", "local-auditor-secret-password",
+            "local-regulator-secret-password"
     );
 
     @Bean
@@ -62,10 +63,12 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/audit/events").hasRole("AUDIT_WRITER")
                         .requestMatchers(HttpMethod.POST, "/audit/events/*/redact").hasRole("AUDIT_WRITER")
+                        .requestMatchers(HttpMethod.POST, "/audit/archive/**").hasRole("AUDIT_WRITER")
+                        .requestMatchers(HttpMethod.GET, "/audit/compliance/account-access").hasAnyRole("REGULATOR", "AUDITOR")
+                        .requestMatchers(HttpMethod.GET, "/audit/compliance/account-access/export").hasAnyRole("REGULATOR", "AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/events").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/verify").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/exports").hasRole("AUDITOR")
-                        .requestMatchers(HttpMethod.POST, "/audit/archive/**").hasRole("AUDIT_WRITER")
                         .anyRequest().denyAll()
                 );
 
@@ -88,6 +91,8 @@ public class SecurityConfiguration {
         String writerPass = properties.getWriter() != null ? properties.getWriter().getPassword() : null;
         String auditorUser = properties.getAuditor() != null ? properties.getAuditor().getUsername() : null;
         String auditorPass = properties.getAuditor() != null ? properties.getAuditor().getPassword() : null;
+        String regulatorUser = properties.getRegulator() != null ? properties.getRegulator().getUsername() : null;
+        String regulatorPass = properties.getRegulator() != null ? properties.getRegulator().getPassword() : null;
 
         if (isLocalOrTest) {
             if (!StringUtils.hasText(writerUser)) {
@@ -102,9 +107,16 @@ public class SecurityConfiguration {
             if (!StringUtils.hasText(auditorPass)) {
                 auditorPass = "test-auditor-password-123";
             }
+            if (!StringUtils.hasText(regulatorUser)) {
+                regulatorUser = "test-regulator";
+            }
+            if (!StringUtils.hasText(regulatorPass)) {
+                regulatorPass = "test-regulator-password-123";
+            }
         } else {
             validateProductionCredentials("writer", writerUser, writerPass);
             validateProductionCredentials("auditor", auditorUser, auditorPass);
+            validateProductionCredentials("regulator", regulatorUser, regulatorPass);
         }
 
         UserDetails writer = User.withUsername(writerUser)
@@ -117,7 +129,12 @@ public class SecurityConfiguration {
                 .roles("AUDITOR")
                 .build();
 
-        return new InMemoryUserDetailsManager(writer, auditor);
+        UserDetails regulator = User.withUsername(regulatorUser)
+                .password(passwordEncoder.encode(regulatorPass))
+                .roles("REGULATOR")
+                .build();
+
+        return new InMemoryUserDetailsManager(writer, auditor, regulator);
     }
 
     private void validateProductionCredentials(String roleName, String username, String password) {

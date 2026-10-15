@@ -30,7 +30,9 @@ class SecurityCredentialValidationTests {
                 .withPropertyValues(
                         "audit.security.writer.password=prod-writer-strong-pass",
                         "audit.security.auditor.username=prod-auditor",
-                        "audit.security.auditor.password=prod-auditor-strong-pass"
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.username=prod-regulator",
+                        "audit.security.regulator.password=prod-regulator-strong-pass"
                 )
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -47,7 +49,9 @@ class SecurityCredentialValidationTests {
                 .withPropertyValues(
                         "audit.security.writer.username=prod-writer",
                         "audit.security.auditor.username=prod-auditor",
-                        "audit.security.auditor.password=prod-auditor-strong-pass"
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.username=prod-regulator",
+                        "audit.security.regulator.password=prod-regulator-strong-pass"
                 )
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -65,7 +69,9 @@ class SecurityCredentialValidationTests {
                         "audit.security.writer.username=prod-writer",
                         "audit.security.writer.password=short",
                         "audit.security.auditor.username=prod-auditor",
-                        "audit.security.auditor.password=prod-auditor-strong-pass"
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.username=prod-regulator",
+                        "audit.security.regulator.password=prod-regulator-strong-pass"
                 )
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -83,13 +89,53 @@ class SecurityCredentialValidationTests {
                         "audit.security.writer.username=prod-writer",
                         "audit.security.writer.password=writer-secret",
                         "audit.security.auditor.username=prod-auditor",
-                        "audit.security.auditor.password=prod-auditor-strong-pass"
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.username=prod-regulator",
+                        "audit.security.regulator.password=prod-regulator-strong-pass"
                 )
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .hasRootCauseInstanceOf(IllegalStateException.class)
                             .hasMessageContaining("is an insecure default placeholder");
+                });
+    }
+
+    @Test
+    @DisplayName("Fails startup in production mode when regulator username is missing")
+    void failsStartupWhenRegulatorUsernameMissing() {
+        contextRunner
+                .withPropertyValues(
+                        "audit.security.writer.username=prod-writer",
+                        "audit.security.writer.password=prod-writer-strong-pass",
+                        "audit.security.auditor.username=prod-auditor",
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.password=prod-regulator-strong-pass"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("Production startup failed: regulator username is required");
+                });
+    }
+
+    @Test
+    @DisplayName("Fails startup in production mode when regulator password is missing")
+    void failsStartupWhenRegulatorPasswordMissing() {
+        contextRunner
+                .withPropertyValues(
+                        "audit.security.writer.username=prod-writer",
+                        "audit.security.writer.password=prod-writer-strong-pass",
+                        "audit.security.auditor.username=prod-auditor",
+                        "audit.security.auditor.password=prod-auditor-strong-pass",
+                        "audit.security.regulator.username=prod-regulator"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("Production startup failed: regulator password is required");
                 });
     }
 
@@ -101,7 +147,9 @@ class SecurityCredentialValidationTests {
                         "audit.security.writer.username=prod-writer",
                         "audit.security.writer.password=prod-writer-strong-password-2026",
                         "audit.security.auditor.username=prod-auditor",
-                        "audit.security.auditor.password=prod-auditor-strong-password-2026"
+                        "audit.security.auditor.password=prod-auditor-strong-password-2026",
+                        "audit.security.regulator.username=prod-regulator",
+                        "audit.security.regulator.password=prod-regulator-strong-password-2026"
                 )
                 .run(context -> {
                     assertThat(context).hasNotFailed();

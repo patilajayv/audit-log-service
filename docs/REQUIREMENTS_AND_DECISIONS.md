@@ -114,25 +114,62 @@ This document separates assignment requirements from engineering choices. "Requi
 - Retrying redaction is idempotent and never creates duplicate meta-audit events. *(Verified in `AuditRedactionServiceIntegrationTests`)*
 - An exported bundle verifies selected event content and chain continuity using only its contents, subject to the trusted-anchor limitation. Crypto-shredded events verify as `INTACT`, and legacy masked events verify chain linkage as `PARTIALLY_VERIFIED_REDACTED`. *(Verified in `AuditExportControllerWebMvcTest`, `StandaloneExportVerifierTest`, `AuditExportIntegrationTests`, and `AuditSecurityIntegrationTests`)*
 
-## Scenario C: Compliance Reporting
+## Scenario C: Compliance Reporting (Milestone 12)
 
 ### Requirements
 
 - Clarify the intentionally ambiguous request that regulators need to audit access to client account data.
-- Record ambiguities, questions or assumptions, the normalized requirement, resulting technical design, and implementation scope boundary.
-- Implement the selected scope or provide a well-reasoned partial implementation.
+- Record ambiguities, stakeholder questions, assumptions made, the normalized requirement statement, resulting technical design, and implementation scope boundaries.
+- Implement the selected compliance scope with production-grade rigor and verified zero-regression against existing milestones.
 
-### Unresolved product questions
+### Ambiguity analysis and production questions
 
-- Which access actions count: read, search, export, administrative access, failed access, or all of them?
-- Which actor types and client-account identifiers must be captured?
-- Which regulators may query or receive exports, and what authorization and output format apply?
-- What retention duration, legal hold behavior, and redaction rules apply?
-- What reporting interval, completeness standard, and evidence of export authenticity are required?
+| Ambiguity | Production Discovery Questions |
+|---|---|
+| **Data Plane vs. Audit Plane** | Does the Audit Log Service store client banking balances/trades, or does it record *access events* generated when users/services inspect account data? |
+| **Scope of Access Actions** | Does "access" encompass views, searches, downloads, automated batch jobs, administrative overrides, failed unauthorized attempts, or modification actions? |
+| **Regulator Access Pattern** | Do external examiners query APIs directly with credentials, or do compliance officers run exports on their behalf? If direct, what authorization applies? |
+| **Supervisory Audit Requirement** | Does inspecting client account audit trails constitute an auditable access event under FINRA/SEC supervisory rules ("auditing the auditors")? |
+| **Evidence Format & Proof** | Do regulators require paginated JSON queries, offline cryptographically verifiable bundles, or certified reports? |
 
-### Provisional normalized requirement
+### Normalized requirement statement
 
-For the prototype, record each successful or failed account-data access with actor, action, account resource identifier, server-recorded time, and structured access context. Auditors can query and export this data under the normal audit authorization model. Regulatory-specific identity, retention duration, legal hold, and format requirements remain documented scope boundaries until clarified.
+For this prototype, the service operates as the immutable *Audit Plane*. Upstream banking systems log standardized client account access events (`resourceType = 'ACCOUNT'`, `resourceId = accountId`). The service provides authenticated regulatory examiners (`ROLE_REGULATOR`) with:
+1. A dedicated, paginated query endpoint (`GET /audit/compliance/account-access`) to inspect historical access events for a specified client account (`resourceType = 'ACCOUNT'`, `resourceId = accountId`), defaulting to comprehensive discovery (`includeArchived = true`).
+2. A dedicated, server-side constrained export endpoint (`GET /audit/compliance/account-access/export`) to generate an offline, self-contained, cryptographically verifiable hash-chain bundle strictly scoped to the specified account.
+3. Mandatory, fail-closed supervisory meta-auditing: each regulatory query and export appends an immutable `REGULATORY_AUDIT_ACCESSED` or `REGULATORY_EXPORT_ACCESSED` event to the ledger; if this append fails, the request aborts with zero account data disclosed.
+4. Strict recursion prevention: supervisory audit records use `resourceType = 'COMPLIANCE_AUDIT'` and are isolated from account access results, guaranteeing stable pagination and zero query feedback loops while preserving full-chain verification.
+5. Strict least-privilege enforcement: regulators are denied access to general audit queries (`/audit/events`), unrestricted exports (`/audit/exports`), full-chain verification (`/audit/verify`), and all write, archival, and redaction APIs.
+
+### Implementation decisions
+
+- **Server-side constrained export isolation**: `ROLE_REGULATOR` is denied access to general `GET /audit/exports` (HTTP 403 Forbidden). Regulatory exports use `GET /audit/compliance/account-access/export?accountId={accountId}` which forces `resourceType = 'ACCOUNT'` server-side. Intermediate events are demoted to hash witnesses, preventing unauthorized exposure of non-account resources. The bundle verifies 100% via `StandaloneExportVerifier` (Java) and `scripts/verify_export.py` (Python).
+- **Fail-closed supervisory audit reliability**: Supervisory records are committed in dedicated write transactions prior to data retrieval. If the append fails (e.g. lock contention, database error), execution terminates immediately and returns sanitized HTTP 503/500 responses without disclosing client account data.
+- **Query and pagination stability**: Paginated queries execute under single-request `READ COMMITTED` transactions ordered monotonically by `sequence_no ASC`. Newly appended records appear at the tail and never shift previously viewed page offsets. Point-in-time snapshot freezes are provided by the export endpoint under `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)`.
+- **Supervisory recursion prevention**: Supervisory events use `resourceType = 'COMPLIANCE_AUDIT'`. Account queries filter by `resourceType = 'ACCOUNT'`, preventing supervisory events from polluting the account's business audit trail or altering pagination offsets. Complete ledger verification (`GET /audit/verify`) validates 100% of rows from genesis to head without filtering.
+- **Zero Flyway migrations**: Preserved Flyway migrations V1–V4 untouched. The existing composite index `(resource_type, resource_id)` from Flyway V1 fully accelerates compliance queries.
+- **Least-privilege role separation**: `ROLE_REGULATOR` is authorized strictly for `/audit/compliance/account-access` and `/audit/compliance/account-access/export`. Internal operational endpoints (`/audit/events`, `/audit/exports`, `/audit/verify`, `/audit/archive/**`, `/audit/events/*/redact`) return HTTP 403 Forbidden.
+
+### Documented production boundaries
+
+1. **Subpoena and examination matter tracking**: In production, regulatory queries mandate an external subpoena or examination reference (e.g. `matterId = "SEC-EXAM-2026-04"`) in request headers to satisfy legal holds.
+2. **Upstream banking data plane integration**: Business access events are emitted by upstream gateways (CRM, branch teller UI, advisor portal) via messaging queues (Kafka/Pulsar) with dead-letter replay.
+3. **mTLS and federated PKI authentication**: External examiners authenticate via client certificate mTLS with hardware security tokens rather than HTTP Basic credentials.
+
+### Acceptance criteria
+
+- `GET /audit/compliance/account-access?accountId={id}` returns `200 OK` with matching account events ordered by `sequence_no ASC`. *(Verified in `AuditComplianceControllerWebMvcTest` and `AuditComplianceIntegrationTests`)*
+- Missing or blank `accountId` returns sanitized `400 Bad Request`. *(Verified in `AuditComplianceControllerWebMvcTest`)*
+- Soft-archived account events are included by default (`includeArchived = true`) and excluded when `includeArchived = false`. *(Verified in `AuditComplianceIntegrationTests`)*
+- Structured redaction displays `"[REDACTED]"` for sensitive fields without mutating ledger rows. *(Verified in `AuditComplianceIntegrationTests`)*
+- Each successful query and export appends an immutable `REGULATORY_AUDIT_ACCESSED` or `REGULATORY_EXPORT_ACCESSED` event to `audit_event`. *(Verified in `AuditComplianceIntegrationTests`)*
+- Fail-closed behavior: supervisory append failure aborts the request with zero data disclosed. *(Verified in `AuditComplianceControllerWebMvcTest`)*
+- Subsequent queries for the account exclude supervisory events from results and do not experience pagination drift. *(Verified in `AuditComplianceIntegrationTests`)*
+- Full-chain verification (`GET /audit/verify`) passes with `status: "INTACT"` across both business and supervisory events. *(Verified in `AuditComplianceIntegrationTests`)*
+- `GET /audit/compliance/account-access/export?accountId={id}` produces a self-contained bundle verifying as `INTACT` via `StandaloneExportVerifier` and `scripts/verify_export.py`. *(Verified in `AuditComplianceIntegrationTests`)*
+- `ROLE_REGULATOR` is authorized for compliance endpoints (200 OK) and strictly forbidden (403 Forbidden) from `/audit/events`, `/audit/exports`, `/audit/verify`, and write/archive/redact endpoints. *(Verified in `AuditSecurityIntegrationTests`)*
+- `ROLE_AUDITOR` is authorized for compliance endpoints; `ROLE_AUDIT_WRITER` is forbidden (403); unauthenticated callers receive 401. *(Verified in `AuditSecurityIntegrationTests`)*
+- All 272 automated tests pass without regression. *(Verified in Maven test run)*
 
 ## Cross-cutting delivery requirements
 

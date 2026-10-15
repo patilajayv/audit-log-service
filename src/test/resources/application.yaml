@@ -12,5 +12,8 @@ audit:
     auditor:
       username: test-auditor
       password: test-auditor-password-123
+    regulator:
+      username: test-regulator
+      password: test-regulator-password-123
   retention:
     window-days: 30

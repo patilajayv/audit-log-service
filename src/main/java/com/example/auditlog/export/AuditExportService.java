@@ -167,7 +167,8 @@ public class AuditExportService {
                     if (criteria.filterType() == ExportFilterCriteria.FilterType.ACTOR_ID) {
                         matchesCriteria = criteria.filterValue().equals(actorId);
                     } else {
-                        matchesCriteria = criteria.filterValue().equals(resourceId);
+                        matchesCriteria = criteria.filterValue().equals(resourceId)
+                                && (criteria.requiredResourceType() == null || criteria.requiredResourceType().equals(resourceType));
                     }
 
                     // If archived records are excluded and this record is archived, treat it as non-matching

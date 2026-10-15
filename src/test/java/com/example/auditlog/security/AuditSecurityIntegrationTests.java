@@ -438,8 +438,162 @@ class AuditSecurityIntegrationTests {
     }
 
     // =========================================================================
-    // Database Invariant Verification
+    // GET /audit/compliance/account-access Authentication & Authorization
     // =========================================================================
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access without authentication returns 401 with WWW-Authenticate header")
+    void getComplianceAccountAccess_unauthenticated_returns401() {
+        ResponseEntity<ErrorResponse> response = restTemplate.getForEntity(
+                "/audit/compliance/account-access?accountId=ACC-1", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access with AUDIT_WRITER role returns 403 Forbidden")
+    void getComplianceAccountAccess_writerRole_returns403() {
+        TestRestTemplate writerTemplate = restTemplate.withBasicAuth("test-writer", "test-writer-password-123");
+        ResponseEntity<ErrorResponse> response = writerTemplate.getForEntity(
+                "/audit/compliance/account-access?accountId=ACC-1", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access with AUDITOR role succeeds with 200 OK")
+    void getComplianceAccountAccess_auditorRole_returns200() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        ResponseEntity<String> response = auditorTemplate.getForEntity(
+                "/audit/compliance/account-access?accountId=ACC-1", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access with REGULATOR role succeeds with 200 OK")
+    void getComplianceAccountAccess_regulatorRole_returns200() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<String> response = regulatorTemplate.getForEntity(
+                "/audit/compliance/account-access?accountId=ACC-1", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    // =========================================================================
+    // GET /audit/compliance/account-access/export Authentication & Authorization
+    // =========================================================================
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access/export without authentication returns 401 with WWW-Authenticate header")
+    void getComplianceExport_unauthenticated_returns401() {
+        ResponseEntity<ErrorResponse> response = restTemplate.getForEntity(
+                "/audit/compliance/account-access/export?accountId=ACC-1", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access/export with AUDIT_WRITER role returns 403 Forbidden")
+    void getComplianceExport_writerRole_returns403() {
+        TestRestTemplate writerTemplate = restTemplate.withBasicAuth("test-writer", "test-writer-password-123");
+        ResponseEntity<ErrorResponse> response = writerTemplate.getForEntity(
+                "/audit/compliance/account-access/export?accountId=ACC-1", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access/export with AUDITOR role succeeds with 200 OK")
+    void getComplianceExport_auditorRole_returns200() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        ResponseEntity<String> response = auditorTemplate.getForEntity(
+                "/audit/compliance/account-access/export?accountId=ACC-1", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("GET /audit/compliance/account-access/export with REGULATOR role succeeds with 200 OK")
+    void getComplianceExport_regulatorRole_returns200() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<String> response = regulatorTemplate.getForEntity(
+                "/audit/compliance/account-access/export?accountId=ACC-1", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    // =========================================================================
+    // REGULATOR Least-Privilege Denials on Internal Operational Endpoints
+    // =========================================================================
+
+    @Test
+    @DisplayName("GET /audit/events with REGULATOR role returns 403 Forbidden")
+    void getEvents_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.getForEntity(
+                "/audit/events", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("GET /audit/exports with REGULATOR role returns 403 Forbidden (restricted to internal AUDITOR)")
+    void getExports_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.getForEntity(
+                "/audit/exports?resourceId=ACC-1", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("GET /audit/verify with REGULATOR role returns 403 Forbidden")
+    void getVerify_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.getForEntity(
+                "/audit/verify", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("POST /audit/events with REGULATOR role returns 403 Forbidden")
+    void postEvents_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        HttpEntity<String> request = new HttpEntity<>(VALID_EVENT_JSON, jsonHeaders());
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.postForEntity(
+                "/audit/events", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("POST /audit/archive/eligible with REGULATOR role returns 403 Forbidden")
+    void postArchive_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.postForEntity(
+                "/audit/archive/eligible", null, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("POST /audit/events/{id}/redact with REGULATOR role returns 403 Forbidden")
+    void postRedact_regulatorRole_returns403() {
+        TestRestTemplate regulatorTemplate = restTemplate.withBasicAuth("test-regulator", "test-regulator-password-123");
+        HttpEntity<String> request = new HttpEntity<>("{\"fieldPath\":\"payload.secret\",\"reason\":\"TEST\"}", jsonHeaders());
+        ResponseEntity<ErrorResponse> response = regulatorTemplate.postForEntity(
+                "/audit/events/" + UUID.randomUUID() + "/redact", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
 
     @Test
     @DisplayName("Rejected (401/403) append requests never modify database state or chain head")

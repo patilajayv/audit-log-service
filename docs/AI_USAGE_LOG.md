@@ -308,3 +308,42 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Full Maven test suite passed: **243 tests run, 0 failures, 0 errors, 0 skipped** across 21 test classes (38 new tests in Milestone 11 over Milestone 10 baseline of 205).
   - `git diff --check` passed cleanly with 0 whitespace errors.
   - Flyway migrations V1–V4 remain strictly untouched.
+
+## 2026-10-15 - Milestone 12 compliance reporting and regulator auditing (Scenario C)
+
+- **Task:** Implement Scenario C: Regulator Auditing of Client Account Data Access in the audit log service.
+- **AI contribution:**
+  - **Phase 1 & 2 Ambiguity Normalization & Technical Design**:
+    - Decomposed under-specified requirement (*"Regulators need to be able to audit access to client account data"*) into explicit assumptions, banking data plane vs. audit plane separation, domain taxonomy, and documented scope boundaries.
+    - Drafted initial and refined design artifacts in `scenario-c-design.md`.
+  - **Regulator Export Isolation (Server-Side Constrained)**:
+    - Blocked `ROLE_REGULATOR` from calling unrestricted `GET /audit/exports` (HTTP 403 Forbidden).
+    - Implemented dedicated endpoint `GET /audit/compliance/account-access/export` using `ExportFilterCriteria.forAccount(...)` with server-side forced `requiredResourceType = 'ACCOUNT'`.
+    - Ensured exported bundles adhere to `ExportBundleDto` v1.0 and verify out-of-the-box via both `StandaloneExportVerifier` (Java) and `scripts/verify_export.py` (Python 3).
+  - **Fail-Closed Supervisory Meta-Auditing**:
+    - Designed and implemented `AuditComplianceService` coordinating durable supervisory event appends (`REGULATORY_AUDIT_ACCESSED` and `REGULATORY_EXPORT_ACCESSED`) before data disclosure.
+    - Enforced fail-closed behavior: supervisory append failures abort execution immediately, returning sanitized HTTP 503/500 errors with zero account data read or disclosed.
+    - Solved supervisory recursion hazard: assigned supervisory events `resourceType = 'COMPLIANCE_AUDIT'` while account queries filter on `resourceType = 'ACCOUNT'`, eliminating query loops and pagination drift while keeping 100% of rows verifiable under `GET /audit/verify`.
+  - **Security & Least Privilege**:
+    - Added `ROLE_REGULATOR` credentials and fail-fast production startup validation in `SecurityUserProperties` and `SecurityConfiguration`.
+    - Enforced strict authorization matrix: regulators can access `/audit/compliance/account-access` and `/export`, but are forbidden (403) from `/audit/events`, `/audit/exports`, `/audit/verify`, and write/archive/redact endpoints.
+  - **Test Implementation**:
+    - `AuditComplianceControllerWebMvcTest` (7 tests): slice tests covering parameter validation, missing/blank `accountId` (HTTP 400), and fail-closed error translation (HTTP 503/500).
+    - `AuditComplianceIntegrationTests` (6 tests): end-to-end Testcontainers PostgreSQL integration covering account and resource-type isolation, supervisory event appends, loop exclusion, soft-archival default inclusion, structured redaction masking, Java/Python export bundle verification, and full-chain verification.
+    - `AuditSecurityIntegrationTests` (14 new tests, 38 total): compliance authentication/authorization and regulator least-privilege denials across all operational endpoints.
+    - `SecurityCredentialValidationTests` (2 new tests, 9 total): regulator missing username and password production startup validation.
+  - **Documentation**: Updated `REQUIREMENTS_AND_DECISIONS.md`, `ARCHITECTURE.md`, `TESTING_AND_BACKLOG.md`, and `AI_USAGE_LOG.md`.
+- **Engineer oversight:**
+  - Directed design-first workflow with explicit ambiguity normalization and scope boundaries before coding.
+  - Mandated server-side constrained export isolation instead of granting regulators access to general `/audit/exports`.
+  - Enforced fail-closed supervisory auditing and durable commit sequencing.
+  - Required explicit honesty regarding multi-request pagination vs single-request snapshot guarantees.
+  - Enforced zero Flyway migrations (V1–V4 preserved untouched) and zero regression on existing milestones.
+- **Decision:** Milestone 12 implementation complete. Changes uncommitted locally pending engineer review.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - Full Maven test suite: **272 tests run, 0 failures, 0 errors, 0 skipped** across 23 test classes (29 new tests in Milestone 12 over Milestone 11 baseline of 243).
+    - All 243 baseline tests passed with 0 regressions.
+  - Python standalone script verification: executed against compliance export bundles via `ProcessBuilder`, verified exit code 0 and `Status: INTACT`.
+  - `git diff --check` passed cleanly with 0 errors.
+  - Flyway migrations V1–V4 remain strictly untouched.
