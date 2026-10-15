@@ -161,7 +161,7 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Required sanitized JSON error responses matching the existing `ErrorResponse` schema, explicitly preserving `WWW-Authenticate: Basic realm="AuditLogService"` on 401 and omitting it on 403.
   - Mandated external credential sourcing and fail-fast startup validation rejecting empty or default passwords in production mode.
   - Required verification that rejected 401 and 403 requests strictly preserve database invariants (no rows inserted, no sequence or chain-head advancement).
-- **Decision:** Pending engineer review. Milestone 8 changes uncommitted locally.
+- **Decision:** Approved by the engineer. Committed locally as `d69a172` with message `feat: implement authentication, role authorization, and least privilege access` (local commit; unpushed to `origin`).
 - **Validation:**
   - Automated test results under Java 17.0.16 / Maven 3.9.11:
     - `AuditSecurityIntegrationTests`: 13 tests run, 0 failures, 0 errors, 0 skipped.
@@ -170,4 +170,46 @@ This log records AI-assisted work honestly. Each future entry will identify the 
     - `AuditEventQueryControllerWebMvcTest`: 9 tests run, 0 failures, 0 errors, 0 skipped.
     - `AuditEventVerifyControllerWebMvcTest`: 3 tests run, 0 failures, 0 errors, 0 skipped.
     - Full Maven suite: 145 tests run, 0 failures, 0 errors, 0 skipped.
+  - `git diff --check` passed with 0 errors.
+
+## 2026-10-15 - Milestone 9 retention, soft archival, and query filtering
+
+- **Task:** Implement Scenario B configurable retention, soft archival (`POST /audit/archive/{eventId}`, `POST /audit/archive/eligible`), Flyway V3 schema migration, default query exclusion (`includeArchived=false`), chain verification preservation, and least-privilege role authorization (`AUDIT_WRITER`).
+- **AI contribution:**
+  - Authored Flyway migration `V3__add_audit_event_archive.sql` introducing `audit_event_archive` table with PK FK to `audit_event(event_id)`, `archived_at`, `policy_ref`, `archive_location`, index on `archived_at`, and granted `SELECT, INSERT` to application role `audit_app`.
+  - Implemented `AuditRetentionProperties` with `@ConfigurationProperties(prefix = "audit.retention")`.
+  - Implemented `AuditArchivalService` featuring `@PostConstruct` fail-fast validation in production mode, single event archival (`archive(UUID)`), and batch archival (`archiveEligible()`) with UTC cutoff computed once per batch execution and idempotent insertion (`ON CONFLICT (event_id) DO NOTHING`).
+  - Implemented `AuditEventNotFoundException` and registered handler in `AuditControllerAdvice` emitting sanitized HTTP 404 `ErrorResponse`.
+  - Implemented `AuditArchivalController` exposing `POST /audit/archive/{eventId}` and `POST /audit/archive/eligible` with correlation IDs and log privacy.
+  - Configured role authorization in `SecurityConfiguration` restricting `/audit/archive/**` to role `AUDIT_WRITER`.
+  - Updated `AuditQueryService`, `AuditQueryCriteria`, `AuditEventDto`, and `AuditEventController` to support `includeArchived=false` by default via `NOT EXISTS`, and `includeArchived=true` via `LEFT JOIN` exposing `archivedAt`.
+  - Implemented MockMvc controller slice tests in `AuditArchivalControllerWebMvcTest` (5 tests).
+  - Implemented production configuration validation tests in `AuditRetentionValidationTests` (6 tests).
+  - Implemented comprehensive service integration tests in `AuditArchivalServiceIntegrationTests` (9 tests) verifying single-event archival, batch archival, cutoff filtering, idempotency, 404 handling, trigger immutability, hash immutability, full-chain verification integrity, and retention window validation.
+  - Added archival security integration tests in `AuditSecurityIntegrationTests` (5 new tests, total 18 tests).
+  - Added query archival integration tests in `AuditQueryIntegrationTests` (3 new tests, total 13 tests).
+  - Added V3 migration tests in `FlywayMigrationIntegrationTests` (2 new tests, total 17 tests).
+  - Added chain verification with archived events test in `AuditVerificationIntegrationTests` (1 new test, total 16 tests).
+  - Added query controller slice test in `AuditEventQueryControllerWebMvcTest` (1 new test, total 10 tests).
+- **Engineer oversight:**
+  - Mandated that `audit_event` rows, hashes, and sequences must remain completely immutable during archival; rejected physical deletion and rejected mutating flags directly on `audit_event`.
+  - Enforced separate `audit_event_archive` table with `audit_app` role restricted to `SELECT, INSERT` (no `UPDATE`/`DELETE`).
+  - Required configurable retention window with batch cutoff evaluated once per run in UTC.
+  - Required fail-fast startup validation for production environments ensuring retention window is explicitly configured and strictly positive.
+  - Mandated idempotent behavior (`ON CONFLICT DO NOTHING`) across single and batch archival operations.
+  - Restricted archival endpoints to `AUDIT_WRITER` role without inventing unapproved new roles.
+  - Verified that `GET /audit/verify` continues to scan and validate 100% of historical events from genesis to chain head without false-positive failures.
+  - Verified that query API excludes archived events by default (`includeArchived=false`) and surfaces `archivedAt` only when requested.
+- **Decision:** Pending engineer review. Milestone 9 changes uncommitted locally.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - `AuditArchivalControllerWebMvcTest`: 5 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditRetentionValidationTests`: 6 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditArchivalServiceIntegrationTests`: 9 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditSecurityIntegrationTests`: 18 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditQueryIntegrationTests`: 13 tests run, 0 failures, 0 errors, 0 skipped.
+    - `FlywayMigrationIntegrationTests`: 17 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditVerificationIntegrationTests`: 16 tests run, 0 failures, 0 errors, 0 skipped.
+    - `AuditEventQueryControllerWebMvcTest`: 10 tests run, 0 failures, 0 errors, 0 skipped.
+    - Full Maven suite: 177 tests run, 0 failures, 0 errors, 0 skipped.
   - `git diff --check` passed with 0 errors.

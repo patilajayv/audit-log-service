@@ -16,8 +16,10 @@
 | Endpoint | Contract | Authorization |
 | --- | --- | --- |
 | `POST /audit/events` | Accepts `eventType`, `actorId`, `resourceType`, `resourceId`, `payload`, and optional `sourceTimestamp`; returns `201` with event ID, sequence, server time, and hashes. Enforces a 1 MiB request body limit (HTTP 413) and strict duplicate key detection (HTTP 400). | `AUDIT_WRITER` |
-| `GET /audit/events` | Optional `actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`, `page`, `size`, and later `includeArchived`; returns a stable sequence-ordered page. | `AUDITOR` |
-| `GET /audit/verify` | Verifies the full global chain; returns intact status or first sequence and violation type. | `AUDITOR` |
+| `GET /audit/events` | Optional `actorId`, `resourceType`, `resourceId`, `eventType`, `from`, `to`, `includeArchived` (default `false`), `page`, `size`; returns a stable sequence-ordered page. When `includeArchived=true`, includes `archivedAt` timestamp. | `AUDITOR` |
+| `GET /audit/verify` | Verifies the full global chain; returns intact status or first sequence and violation type. Streams all original events regardless of archival state. | `AUDITOR` |
+| `POST /audit/archive/{eventId}` | Archives an individual event by ID. Idempotent (HTTP 200). Returns `ArchiveEventResult`. Returns HTTP 404 if event does not exist. | `AUDIT_WRITER` |
+| `POST /audit/archive/eligible` | Batch archives all events recorded before the configured retention cutoff window ($now - windowDays$). Idempotent (HTTP 200). Returns count of newly archived events and cutoff timestamp used. | `AUDIT_WRITER` |
 | `GET /audit/exports` | Scenario B endpoint. Requires exactly one of `actorId` or `resourceId`; returns a verifiable bundle. | `AUDITOR` |
 
 No `PUT`, `PATCH`, or `DELETE` audit-event endpoint will exist. Unauthenticated requests receive `401`; authenticated callers without the required role receive `403`.
@@ -31,7 +33,7 @@ The write API is implemented by `AuditEventController` and protected by defensiv
 3. **Payload validation**: Null or non-object payloads and integers outside safe IEEE-754 range $[-(2^{53}-1), 2^{53}-1]$ are rejected with HTTP 400.
 4. **Timestamp normalization**: Omitted timestamps default to `null`. Offset-bearing timestamps (e.g. `+02:00`) are parsed to UTC `Instant` and normalized to millisecond precision (`ChronoUnit.MILLIS`).
 5. **Delegation**: Delegates directly to transactional `AuditAppendService.append(request)`.
-6. **Error handling and sanitization (`AuditControllerAdvice`)**: Maps handled exception categories to appropriate HTTP status codes: client syntax and validation failures (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `IllegalArgumentException`) to HTTP 400; body size limit exceedance (`PayloadTooLargeException`) to HTTP 413; media type mismatches (`HttpMediaTypeNotSupportedException`) to HTTP 415; unsupported methods (`HttpRequestMethodNotSupportedException`) to HTTP 405; and chain-head lock contention (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `QueryTimeoutException`) to HTTP 503 with a `Retry-After: 1` header. For database failures (`DataAccessException`, `SQLException`) and unexpected errors (`Exception`), it emits sanitized generic HTTP 500 responses (`"An internal database error occurred while recording the audit event."` or `"An internal error occurred while processing the audit event."`), actively suppressing SQL syntax, table names, constraint details, and stack traces. Operational logs record correlation IDs, `eventId`, and `sequenceNo`, while omitting sensitive event `payload`, `actorId`, and `resourceId` values.
+6. **Error handling and sanitization (`AuditControllerAdvice`)**: Maps handled exception categories to appropriate HTTP status codes: client syntax and validation failures (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `IllegalArgumentException`) to HTTP 400; not found errors (`AuditEventNotFoundException`) to HTTP 404; body size limit exceedance (`PayloadTooLargeException`) to HTTP 413; media type mismatches (`HttpMediaTypeNotSupportedException`) to HTTP 415; unsupported methods (`HttpRequestMethodNotSupportedException`) to HTTP 405; and chain-head lock contention (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `QueryTimeoutException`) to HTTP 503 with a `Retry-After: 1` header. For database failures (`DataAccessException`, `SQLException`) and unexpected errors (`Exception`), it emits sanitized generic HTTP 500 responses (`"An internal database error occurred while recording the audit event."` or `"An internal error occurred while processing the audit event."`), actively suppressing SQL syntax, table names, constraint details, and stack traces. Operational logs record correlation IDs, `eventId`, and `sequenceNo`, while omitting sensitive event `payload`, `actorId`, and `resourceId` values.
 
 ## Data model
 
@@ -56,7 +58,18 @@ One row for the global chain stores `last_sequence_no` and `last_record_hash`. I
 
 ### `audit_event_archive`
 
-Scenario B metadata keyed by `event_id`, containing archival time, policy reference, and archival location. It is not part of the immutable event content hash. The original event remains present for verification.
+Scenario B archival metadata keyed by `event_id` (Flyway `V3__add_audit_event_archive.sql`).
+
+| Column | Type | Purpose |
+| --- | --- | --- |
+| `event_id` | `UUID PRIMARY KEY` | References `audit_event(event_id)` via foreign key constraint. |
+| `archived_at` | `TIMESTAMPTZ NOT NULL` | Service-assigned UTC timestamp when the record was archived. |
+| `policy_ref` | `VARCHAR(128) NOT NULL` | Identifier of retention policy rule applied (e.g., `RETENTION_WINDOW_DAYS`). |
+| `archive_location` | `VARCHAR(256)` | Optional reference or URI to cold storage/external archive destination. |
+
+Index on `archived_at` accelerates time-based archival queries and pruning.
+The table is owned by `audit_migrator`, and the application role `audit_app` is granted `SELECT, INSERT` (no `UPDATE` or `DELETE`).
+Archiving records into this table never alters or mutates rows in `audit_event`, preserving all cryptographic hashes, sequences, and chain links.
 
 ## Hash chain
 
@@ -178,6 +191,8 @@ The service implements stateless HTTP Basic authentication and role-based access
 2. **Password encoding**: All user passwords are encrypted using `BCryptPasswordEncoder`.
 3. **Role-based authorization and default deny**:
    - `POST /audit/events`: requires role `AUDIT_WRITER`
+   - `POST /audit/archive/{eventId}`: requires role `AUDIT_WRITER`
+   - `POST /audit/archive/eligible`: requires role `AUDIT_WRITER`
    - `GET /audit/events`: requires role `AUDITOR`
    - `GET /audit/verify`: requires role `AUDITOR`
    - All other routes are denied by default via `.anyRequest().denyAll()`.
@@ -194,12 +209,37 @@ The service implements stateless HTTP Basic authentication and role-based access
 
 | Role | Allowed operations | Prohibited operations |
 | --- | --- | --- |
-| `AUDIT_WRITER` | Create audit events (`POST /audit/events`). | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`). |
-| `AUDITOR` | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`), export records. | Create audit events (`POST /audit/events`). |
+| `AUDIT_WRITER` | Create audit events (`POST /audit/events`), archive audit events (`POST /audit/archive/{eventId}`, `POST /audit/archive/eligible`). | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`). |
+| `AUDITOR` | Query events (`GET /audit/events`), verify chain (`GET /audit/verify`), export records. | Create audit events (`POST /audit/events`), archive events (`POST /audit/archive/**`). |
 
 Production controls would add centralized identity (OIDC/OAuth2/mTLS), short-lived token issuance, secret management (Vault/AWS Secrets Manager), network policy restrictions, auditing of privileged database access, and separate operational roles.
 
-## Retention, redaction, and export
+## Retention, archival, redaction, and export
+
+### Retention and archival implementation
+
+1. **Retention policy configuration**:
+   - Configured via `audit.retention.window-days` (bound to `AuditRetentionProperties`).
+   - Defaults to 90 days in local profile (`application-local.yaml`) and 30 days in test profile (`src/test/resources/application.yaml`).
+   - In production environments, `@PostConstruct` fail-fast validation ensures `audit.retention.window-days` is explicitly configured and strictly positive ($> 0$), aborting context startup with `IllegalStateException` if missing, non-positive, or unconfigured.
+
+2. **Batch cutoff evaluation**:
+   - Batch archival computes a single UTC cutoff timestamp once per batch execution: `cutoff = Instant.now().minus(windowDays, ChronoUnit.DAYS).truncatedTo(ChronoUnit.MILLIS)`.
+   - All events with `recorded_at < cutoff` that lack an entry in `audit_event_archive` are archived atomically.
+
+3. **Atomic, idempotent operations**:
+   - `POST /audit/archive/{eventId}`: Archives an individual event by ID. Inserts into `audit_event_archive` with `ON CONFLICT (event_id) DO NOTHING`. Returns `archived: true` if newly archived, or `archived: false` (with original `archivedAt`) if already archived. Throws `AuditEventNotFoundException` (mapped to sanitized HTTP 404 `ErrorResponse`) if the event ID does not exist in `audit_event`.
+   - `POST /audit/archive/eligible`: Batch archives all eligible records older than the retention cutoff. Uses `INSERT INTO audit_event_archive ... SELECT ... WHERE recorded_at < ? ON CONFLICT (event_id) DO NOTHING`. Returns count of newly archived records and batch cutoff timestamp.
+
+4. **Chain verification preservation**:
+   - `GET /audit/verify` streams all records directly from `audit_event ORDER BY sequence_no ASC` without filtering by archive state.
+   - Archiving records never updates, deletes, or alters `audit_event` rows, sequence numbers, or `audit_chain_head`. Verification continues to cryptographically validate 100% of historical events from genesis to chain head with zero false-positive failures.
+
+5. **Query behavior**:
+   - `GET /audit/events` excludes archived records by default using `WHERE NOT EXISTS (SELECT 1 FROM audit_event_archive a WHERE a.event_id = e.event_id)`.
+   - When callers specify `includeArchived=true`, queries include both active and archived records via `LEFT JOIN audit_event_archive a ON a.event_id = e.event_id`, populating `archivedAt` on returned `AuditEventDto` objects.
+
+### Redaction and export
 
 Soft archival records metadata without mutating the original chain row. Verification always scans archived events. Redaction uses encrypted payload envelopes before hashing; the stored ciphertext and envelope metadata stay immutable, while removing the decryption key produces a redacted response projection.
 

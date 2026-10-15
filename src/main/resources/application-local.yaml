@@ -18,3 +18,5 @@ audit:
     auditor:
       username: ${AUDIT_SECURITY_AUDITOR_USERNAME:local_auditor}
       password: ${AUDIT_SECURITY_AUDITOR_PASSWORD:local-auditor-secret-password}
+  retention:
+    window-days: 90

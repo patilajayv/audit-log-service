@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Collections;
 import java.util.Map;
+import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -246,6 +247,70 @@ class AuditSecurityIntegrationTests {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().status()).isEqualTo("INTACT");
+    }
+
+    // =========================================================================
+    // POST /audit/archive/** Authentication & Authorization
+    // =========================================================================
+
+    @Test
+    @DisplayName("POST /audit/archive/{eventId} without authentication returns 401 with WWW-Authenticate header")
+    void postArchiveSingle_unauthenticated_returns401() {
+        HttpEntity<String> request = new HttpEntity<>("{\"policyRef\":\"manual\"}", jsonHeaders());
+        ResponseEntity<ErrorResponse> response = restTemplate.postForEntity(
+                "/audit/archive/" + UUID.randomUUID(), request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("POST /audit/archive/{eventId} with AUDITOR role returns 403 Forbidden")
+    void postArchiveSingle_auditorRole_returns403() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        HttpEntity<String> request = new HttpEntity<>("{\"policyRef\":\"manual\"}", jsonHeaders());
+        ResponseEntity<ErrorResponse> response = auditorTemplate.postForEntity(
+                "/audit/archive/" + UUID.randomUUID(), request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("POST /audit/archive/eligible without authentication returns 401")
+    void postArchiveEligible_unauthenticated_returns401() {
+        HttpEntity<String> request = new HttpEntity<>("{\"policyRef\":\"default-90d\"}", jsonHeaders());
+        ResponseEntity<ErrorResponse> response = restTemplate.postForEntity(
+                "/audit/archive/eligible", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("POST /audit/archive/eligible with AUDITOR role returns 403 Forbidden")
+    void postArchiveEligible_auditorRole_returns403() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        HttpEntity<String> request = new HttpEntity<>("{\"policyRef\":\"default-90d\"}", jsonHeaders());
+        ResponseEntity<ErrorResponse> response = auditorTemplate.postForEntity(
+                "/audit/archive/eligible", request, ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    @DisplayName("POST /audit/archive/eligible with AUDIT_WRITER role succeeds with 200 OK")
+    void postArchiveEligible_writerRole_returns200() {
+        TestRestTemplate writerTemplate = restTemplate.withBasicAuth("test-writer", "test-writer-password-123");
+        HttpEntity<String> request = new HttpEntity<>("{\"policyRef\":\"default-90d\"}", jsonHeaders());
+        ResponseEntity<Map> response = writerTemplate.postForEntity(
+                "/audit/archive/eligible", request, Map.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().get("archivedCount")).isNotNull();
     }
 
     // =========================================================================

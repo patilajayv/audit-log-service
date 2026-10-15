@@ -120,8 +120,44 @@ class AuditEventQueryControllerWebMvcTest {
         assertThat(criteria.eventType()).isNull();
         assertThat(criteria.from()).isNull();
         assertThat(criteria.to()).isNull();
+        assertThat(criteria.includeArchived()).isFalse();
 
         verify(appendService, never()).append(any());
+    }
+
+    @Test
+    @DisplayName("GET /audit/events with includeArchived=true binds criteria and exposes archivedAt in response")
+    void testGetEvents_includeArchived() throws Exception {
+        AuditEventDto event = new AuditEventDto(
+                1L,
+                EVENT_ID,
+                "user.login",
+                "usr_123",
+                "session",
+                "sess_abc",
+                objectMapper.readTree("{\"ip\":\"10.0.0.1\"}"),
+                SOURCE_TIMESTAMP,
+                RECORDED_AT,
+                "1",
+                CONTENT_HASH,
+                PREVIOUS_HASH,
+                RECORD_HASH,
+                "2026-10-15T05:00:00.000Z");
+
+        AuditPageResponse<AuditEventDto> pageResponse = new AuditPageResponse<>(
+                List.of(event), 0, 20, 1L, 1, true, true);
+
+        when(queryService.query(any(AuditQueryCriteria.class))).thenReturn(pageResponse);
+
+        mockMvc.perform(get("/audit/events")
+                        .param("includeArchived", "true")
+                        .accept(MediaType.APPLICATION_JSON))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.events[0].archivedAt").value("2026-10-15T05:00:00.000Z"));
+
+        ArgumentCaptor<AuditQueryCriteria> captor = ArgumentCaptor.forClass(AuditQueryCriteria.class);
+        verify(queryService).query(captor.capture());
+        assertThat(captor.getValue().includeArchived()).isTrue();
     }
 
     @Test

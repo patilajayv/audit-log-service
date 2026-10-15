@@ -21,6 +21,11 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Enforces strictly parameterized SQL queries for all user criteria, applies stable
  * {@code sequence_no ASC} ordering, and never mutates audit records or the chain head.
+ *
+ * <p>When {@code criteria.includeArchived()} is {@code false} (the default), both the count
+ * query and the data query exclude events that have a row in {@code audit_event_archive}.
+ * When {@code true}, all events are returned and the {@link AuditEventDto#archivedAt()} field
+ * is populated for archived events (null for non-archived events).
  */
 @Service
 @Transactional(readOnly = true)
@@ -47,34 +52,39 @@ public class AuditQueryService {
         List<Object> params = new ArrayList<>();
 
         if (criteria.actorId() != null) {
-            conditions.add("actor_id = ?");
+            conditions.add("ae.actor_id = ?");
             params.add(criteria.actorId());
         }
         if (criteria.resourceType() != null) {
-            conditions.add("resource_type = ?");
+            conditions.add("ae.resource_type = ?");
             params.add(criteria.resourceType());
         }
         if (criteria.resourceId() != null) {
-            conditions.add("resource_id = ?");
+            conditions.add("ae.resource_id = ?");
             params.add(criteria.resourceId());
         }
         if (criteria.eventType() != null) {
-            conditions.add("event_type = ?");
+            conditions.add("ae.event_type = ?");
             params.add(criteria.eventType());
         }
         if (criteria.from() != null) {
-            conditions.add("recorded_at >= ?");
+            conditions.add("ae.recorded_at >= ?");
             params.add(Timestamp.from(criteria.from()));
         }
         if (criteria.to() != null) {
-            conditions.add("recorded_at <= ?");
+            conditions.add("ae.recorded_at <= ?");
             params.add(Timestamp.from(criteria.to()));
+        }
+
+        // Exclude archived events unless the caller explicitly requests them
+        if (!criteria.includeArchived()) {
+            conditions.add("NOT EXISTS (SELECT 1 FROM audit_event_archive arch WHERE arch.event_id = ae.event_id)");
         }
 
         String whereClause = conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions);
 
-        // Count total matching elements
-        String countSql = "SELECT count(*) FROM audit_event" + whereClause;
+        // Count total matching elements (using the same alias and conditions)
+        String countSql = "SELECT count(*) FROM audit_event ae" + whereClause;
         Long countResult = jdbc.queryForObject(countSql, Long.class, params.toArray());
         long totalElements = countResult != null ? countResult : 0L;
 
@@ -87,13 +97,18 @@ public class AuditQueryService {
             return AuditPageResponse.of(Collections.emptyList(), criteria.page(), criteria.size(), totalElements);
         }
 
-        // Fetch paginated data ordered strictly by sequence_no ASC
+        // Fetch paginated data ordered strictly by sequence_no ASC.
+        // LEFT JOIN audit_event_archive to surface archivedAt (null when not archived).
         String dataSql = """
-                SELECT sequence_no, event_id, event_type, actor_id, resource_type, resource_id,
-                       payload, source_timestamp, recorded_at, canonicalization_version,
-                       content_hash, previous_hash, record_hash
-                FROM audit_event
-                """ + whereClause + " ORDER BY sequence_no ASC LIMIT ? OFFSET ?";
+                SELECT ae.sequence_no, ae.event_id, ae.event_type, ae.actor_id,
+                       ae.resource_type, ae.resource_id,
+                       ae.payload, ae.source_timestamp, ae.recorded_at,
+                       ae.canonicalization_version,
+                       ae.content_hash, ae.previous_hash, ae.record_hash,
+                       arch.archived_at
+                FROM audit_event ae
+                LEFT JOIN audit_event_archive arch ON arch.event_id = ae.event_id
+                """ + whereClause + " ORDER BY ae.sequence_no ASC LIMIT ? OFFSET ?";
 
         List<Object> dataParams = new ArrayList<>(params);
         dataParams.add(criteria.size());
@@ -133,6 +148,11 @@ public class AuditQueryService {
             String previousHash = rs.getString("previous_hash");
             String recordHash = rs.getString("record_hash");
 
+            Timestamp archivedAtTs = rs.getTimestamp("archived_at");
+            String formattedArchivedAt = archivedAtTs != null
+                    ? hashService.formatTimestamp(archivedAtTs.toInstant())
+                    : null;
+
             return new AuditEventDto(
                     sequenceNo,
                     eventId,
@@ -146,7 +166,8 @@ public class AuditQueryService {
                     canonicalizationVersion,
                     contentHash,
                     previousHash,
-                    recordHash);
+                    recordHash,
+                    formattedArchivedAt);
         }
     }
 }

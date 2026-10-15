@@ -68,25 +68,30 @@ This document separates assignment requirements from engineering choices. "Requi
 
 ### Requirements
 
-- Records older than a configurable retention window must be archivable or soft-deletable without false chain failures.
+- Records older than a configurable retention window must be archivable or soft-deletable without false chain failures. *(Implemented and verified in Milestone 9)*
 - Sensitive payload fields must be redactable without breaking tamper evidence.
 - Export all records for an `actorId` or `resourceId` as a self-contained verifiable bundle.
 - Document the redaction design, alternatives, limitations, and trade-offs.
 
 ### Assumptions
 
-- The prototype can retain immutable event evidence while presenting archived and redacted read projections.
+- The prototype retains immutable event evidence while presenting archived and redacted read projections.
+- Archival status is managed via separate metadata (`audit_event_archive`) created in Flyway migration V3.
 
-### Recommendations
+### Recommendations and implementation decisions
 
-- Retention initially means soft archival: immutable chain records remain available to verification while normal queries may omit archived records.
-- Archive state belongs in metadata separate from the immutable audit event, so archiving never changes a hashed row.
-- Sensitive fields are represented as encrypted payload envelopes before the event is hashed. Redaction disables or destroys the referenced decryption key and returns a redacted projection.
-- The initial export includes selected full records and hash-only witness records needed to establish continuity between the first and last selected sequence. It also includes the observed chain-head checkpoint.
+- **Retention via soft archival**: Implemented with separate `audit_event_archive` metadata keyed by `event_id` (PK FK to `audit_event.event_id`). Archiving an event never mutates or deletes rows in `audit_event`.
+- **Configurable retention window**: Configured via `audit.retention.window-days`. Safe defaults are provided for `local` (90 days) and `test` (30 days); production environments strictly require an explicit positive value ($> 0$), validated at application startup.
+- **Atomic, idempotent archival endpoints**: `POST /audit/archive/{eventId}` for targeted single-event archival and `POST /audit/archive/eligible` for batch archival of records older than the cutoff ($now - windowDays$). Both endpoints use `ON CONFLICT (event_id) DO NOTHING` for idempotent retry safety and are restricted to `AUDIT_WRITER`.
+- **Preserved global verification**: `GET /audit/verify` streams directly from `audit_event` and validates 100% of events from genesis to chain head, guaranteeing zero false-positive chain failures for legitimately archived events.
+- **Default query exclusion**: `GET /audit/events` omits archived records by default (`includeArchived=false`). Callers requesting `includeArchived=true` receive active and archived records with `archivedAt` populated.
+- **Payload redaction**: Sensitive fields will be represented as encrypted payload envelopes before the event is hashed. Redaction disables or destroys the referenced decryption key and returns a redacted projection.
+- **Verifiable export bundle**: The export bundle will include selected full records and hash-only witness records needed to establish continuity between the first and last selected sequence, alongside the observed chain-head checkpoint.
 
 ### Acceptance criteria
 
-- Archiving does not alter verification of the complete chain.
+- Archiving does not alter verification of the complete chain. *(Verified in `AuditVerificationIntegrationTests` and `AuditArchivalServiceIntegrationTests`)*
+- Normal queries omit archived events by default, but expose them with `archivedAt` when explicitly requested. *(Verified in `AuditQueryIntegrationTests`)*
 - A redacted response never exposes protected plaintext, while the original ciphertext envelope remains verifiable.
 - An exported bundle verifies selected event content and chain continuity using only its contents, subject to the trusted-anchor limitation recorded below.
 

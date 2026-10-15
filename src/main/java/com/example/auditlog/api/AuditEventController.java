@@ -71,13 +71,14 @@ public class AuditEventController {
             @RequestParam(required = false) String to,
             @RequestParam(required = false, defaultValue = "0") Integer page,
             @RequestParam(required = false, defaultValue = "20") Integer size,
+            @RequestParam(required = false, defaultValue = "false") Boolean includeArchived,
             HttpServletRequest httpRequest) {
 
         String correlationId = resolveCorrelationId(httpRequest);
         log.debug("Processing audit query request: correlationId={}", correlationId);
 
         AuditQueryCriteria criteria = AuditQueryCriteria.of(
-                actorId, resourceType, resourceId, eventType, from, to, page, size);
+                actorId, resourceType, resourceId, eventType, from, to, page, size, includeArchived);
 
         AuditPageResponse<AuditEventDto> response = queryService.query(criteria);
         return ResponseEntity.ok(response);

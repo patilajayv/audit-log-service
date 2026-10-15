@@ -1,5 +1,6 @@
 package com.example.auditlog.security;
 
+import com.example.auditlog.archival.AuditRetentionProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.util.Set;
@@ -31,12 +32,13 @@ import org.springframework.util.StringUtils;
  *   <li>{@code POST /audit/events} requires role {@code AUDIT_WRITER}</li>
  *   <li>{@code GET /audit/events} requires role {@code AUDITOR}</li>
  *   <li>{@code GET /audit/verify} requires role {@code AUDITOR}</li>
+ *   <li>{@code POST /audit/archive/**} requires role {@code AUDIT_WRITER}</li>
  *   <li>All other requests are denied by default</li>
  * </ul>
  */
 @Configuration
 @EnableWebSecurity
-@EnableConfigurationProperties(SecurityUserProperties.class)
+@EnableConfigurationProperties({SecurityUserProperties.class, AuditRetentionProperties.class})
 public class SecurityConfiguration {
 
     private static final Set<String> INSECURE_PASSWORDS = Set.of(
@@ -61,6 +63,7 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.POST, "/audit/events").hasRole("AUDIT_WRITER")
                         .requestMatchers(HttpMethod.GET, "/audit/events").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/verify").hasRole("AUDITOR")
+                        .requestMatchers(HttpMethod.POST, "/audit/archive/**").hasRole("AUDIT_WRITER")
                         .anyRequest().denyAll()
                 );
 

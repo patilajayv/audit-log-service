@@ -144,6 +144,81 @@ class FlywayMigrationIntegrationTests {
     }
 
     @Test
+    void v3CreatesAuditEventArchiveTable() throws SQLException {
+        try (Connection connection = connection();
+                Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        SELECT column_name, data_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_name = 'audit_event_archive'
+                        ORDER BY ordinal_position
+                        """)) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("event_id");
+            assertThat(result.getString("data_type")).isEqualTo("uuid");
+            assertThat(result.getString("is_nullable")).isEqualTo("NO");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("archived_at");
+            assertThat(result.getString("data_type")).isEqualTo("timestamp with time zone");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("policy_ref");
+            assertThat(result.getString("data_type")).isEqualTo("text");
+
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("column_name")).isEqualTo("archive_location");
+            assertThat(result.getString("data_type")).isEqualTo("text");
+
+            assertThat(result.next()).isFalse();
+        }
+    }
+
+    @Test
+    void v3GrantsAuditAppInsertAndSelectOnArchiveTable() throws SQLException {
+        UUID eventId = UUID.randomUUID();
+        try (Connection adminConn = connection()) {
+            appendEvent(adminConn, 1, GENESIS_HASH, FIRST_RECORD_HASH, eventId);
+        }
+
+        try (Connection appConn = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), "audit_app", APPLICATION_PASSWORD)) {
+
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "INSERT INTO audit_event_archive (event_id, policy_ref) VALUES (?, 'test-policy')")) {
+                stmt.setObject(1, eventId);
+                int rows = stmt.executeUpdate();
+                assertThat(rows).isEqualTo(1);
+            }
+
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "SELECT count(*) FROM audit_event_archive WHERE event_id = ?")) {
+                stmt.setObject(1, eventId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getLong(1)).isEqualTo(1);
+                }
+            }
+
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "UPDATE audit_event_archive SET policy_ref = 'hacked' WHERE event_id = ?")) {
+                stmt.setObject(1, eventId);
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+            }
+
+            try (PreparedStatement stmt = appConn.prepareStatement(
+                    "DELETE FROM audit_event_archive WHERE event_id = ?")) {
+                stmt.setObject(1, eventId);
+                assertThatThrownBy(stmt::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+            }
+        }
+    }
+
+    @Test
     void migrationRejectsHeadAdvanceWithoutMatchingEvent() throws SQLException {
         try (Connection connection = connection(); Statement statement = connection.createStatement()) {
             SQLException exception = assertThrows(
@@ -233,10 +308,14 @@ class FlywayMigrationIntegrationTests {
             SQLException truncateException = assertThrows(
                     SQLException.class,
                     () -> statement.executeUpdate("TRUNCATE audit_event"));
+            SQLException truncateCascadeException = assertThrows(
+                    SQLException.class,
+                    () -> statement.executeUpdate("TRUNCATE audit_event CASCADE"));
 
             assertThat(updateException.getSQLState()).isEqualTo("55000");
             assertThat(deleteException.getSQLState()).isEqualTo("55000");
-            assertThat(truncateException.getSQLState()).isEqualTo("55000");
+            assertThat(truncateException.getSQLState()).isIn("55000", "0A000");
+            assertThat(truncateCascadeException.getSQLState()).isEqualTo("55000");
         }
     }
 
@@ -326,7 +405,13 @@ class FlywayMigrationIntegrationTests {
     }
 
     private static void migrateV2() {
-        assertThat(flyway.migrate().migrationsExecuted).isEqualTo(1);
+        Flyway.configure()
+                .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                .locations("classpath:db/migration")
+                .target("2")
+                .cleanDisabled(false)
+                .load()
+                .migrate();
     }
 
     private static void assertV2MigrationRejected() throws SQLException {
@@ -337,9 +422,14 @@ class FlywayMigrationIntegrationTests {
     }
 
     private static void appendEvent(Connection connection, long sequenceNo, String previousHash, String recordHash) throws SQLException {
+        appendEvent(connection, sequenceNo, previousHash, recordHash,
+                UUID.fromString(String.format("00000000-0000-0000-0000-%012d", sequenceNo)));
+    }
+
+    private static void appendEvent(Connection connection, long sequenceNo, String previousHash, String recordHash, UUID eventId) throws SQLException {
         connection.setAutoCommit(false);
         try {
-            insertEvent(connection, sequenceNo, previousHash, recordHash);
+            insertEvent(connection, sequenceNo, previousHash, recordHash, eventId);
             advanceHead(connection, sequenceNo, recordHash);
             connection.commit();
         } catch (SQLException exception) {

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.auditlog.append.AppendEventRequest;
 import com.example.auditlog.append.AppendEventResult;
 import com.example.auditlog.append.AuditAppendService;
+import com.example.auditlog.archival.AuditArchivalService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
@@ -48,6 +49,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class AuditQueryIntegrationTests {
 
+    private static final ParameterizedTypeReference<AuditPageResponse<AuditEventDto>> EVENT_PAGE_TYPE =
+            new ParameterizedTypeReference<>() {};
+
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
 
@@ -73,6 +77,9 @@ class AuditQueryIntegrationTests {
 
     @Autowired
     private AuditAppendService appendService;
+
+    @Autowired
+    private AuditArchivalService archivalService;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -343,6 +350,83 @@ class AuditQueryIntegrationTests {
                 "/audit/events?from=2026-10-15T12:00:01Z&to=2026-10-15T12:00:00Z", Map.class);
         assertThat(reversed.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(reversed.getBody().get("message")).isEqualTo("'from' timestamp must not be after 'to' timestamp");
+    }
+
+    @Test
+    @DisplayName("Query excludes archived events by default when includeArchived is not specified")
+    void testQueryExcludesArchivedEventsByDefault() throws Exception {
+        List<AppendEventResult> seeded = seedEvents(3);
+        archivalService.archive(seeded.get(1).eventId(), "retention-policy");
+
+        ResponseEntity<AuditPageResponse<AuditEventDto>> response = restTemplate.exchange(
+                "/audit/events",
+                HttpMethod.GET,
+                null,
+                EVENT_PAGE_TYPE);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        AuditPageResponse<AuditEventDto> page = response.getBody();
+        assertThat(page).isNotNull();
+        assertThat(page.totalElements()).isEqualTo(2);
+        assertThat(page.events()).hasSize(2);
+        assertThat(page.events().stream().map(AuditEventDto::eventId))
+                .containsExactly(seeded.get(0).eventId(), seeded.get(2).eventId());
+    }
+
+    @Test
+    @DisplayName("Query includes archived events when includeArchived=true and exposes archivedAt")
+    void testQueryIncludesArchivedEventsWithFlag() throws Exception {
+        List<AppendEventResult> seeded = seedEvents(3);
+        archivalService.archive(seeded.get(1).eventId(), "retention-policy");
+
+        ResponseEntity<AuditPageResponse<AuditEventDto>> response = restTemplate.exchange(
+                "/audit/events?includeArchived=true",
+                HttpMethod.GET,
+                null,
+                EVENT_PAGE_TYPE);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        AuditPageResponse<AuditEventDto> page = response.getBody();
+        assertThat(page).isNotNull();
+        assertThat(page.totalElements()).isEqualTo(3);
+        assertThat(page.events()).hasSize(3);
+
+        AuditEventDto unarchived1 = page.events().get(0);
+        AuditEventDto archived = page.events().get(1);
+        AuditEventDto unarchived2 = page.events().get(2);
+
+        assertThat(unarchived1.eventId()).isEqualTo(seeded.get(0).eventId());
+        assertThat(unarchived1.archivedAt()).isNull();
+
+        assertThat(archived.eventId()).isEqualTo(seeded.get(1).eventId());
+        assertThat(archived.archivedAt()).isNotNull();
+
+        assertThat(unarchived2.eventId()).isEqualTo(seeded.get(2).eventId());
+        assertThat(unarchived2.archivedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("Query execution with includeArchived maintains read-only database immutability")
+    void testQueryReadOnlyInvariantWithArchive() throws Exception {
+        List<AppendEventResult> seeded = seedEvents(3);
+        archivalService.archive(seeded.get(0).eventId(), "retention-policy");
+
+        Map<String, Object> headBefore = jdbcTemplate.queryForMap(
+                "SELECT last_sequence_no, last_record_hash FROM audit_chain_head WHERE chain_id = 1");
+        long countBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM audit_event", Long.class);
+        long archiveCountBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM audit_event_archive", Long.class);
+
+        restTemplate.exchange("/audit/events?includeArchived=true", HttpMethod.GET, null, EVENT_PAGE_TYPE);
+        restTemplate.exchange("/audit/events?includeArchived=false", HttpMethod.GET, null, EVENT_PAGE_TYPE);
+
+        Map<String, Object> headAfter = jdbcTemplate.queryForMap(
+                "SELECT last_sequence_no, last_record_hash FROM audit_chain_head WHERE chain_id = 1");
+        long countAfter = jdbcTemplate.queryForObject("SELECT count(*) FROM audit_event", Long.class);
+        long archiveCountAfter = jdbcTemplate.queryForObject("SELECT count(*) FROM audit_event_archive", Long.class);
+
+        assertThat(headAfter).isEqualTo(headBefore);
+        assertThat(countAfter).isEqualTo(countBefore);
+        assertThat(archiveCountAfter).isEqualTo(archiveCountBefore);
     }
 
     private List<AppendEventResult> seedEvents(int count) throws Exception {

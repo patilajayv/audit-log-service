@@ -122,6 +122,21 @@ public class AuditControllerAdvice {
                 .body(body);
     }
 
+    @ExceptionHandler(AuditEventNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleAuditEventNotFound(
+            AuditEventNotFoundException ex, HttpServletRequest request) {
+        String correlationId = resolveCorrelationId(request);
+        log.debug("Audit event not found: eventId={} correlationId={}", ex.getEventId(), correlationId);
+        ErrorResponse body = new ErrorResponse(
+                HttpStatus.NOT_FOUND.value(),
+                HttpStatus.NOT_FOUND.getReasonPhrase(),
+                ex.getMessage(),
+                clock.instant());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
+    }
+
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ErrorResponse> handleTypeMismatch(
             MethodArgumentTypeMismatchException ex, HttpServletRequest request) {

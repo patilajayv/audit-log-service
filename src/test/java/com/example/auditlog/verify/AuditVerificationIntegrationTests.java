@@ -449,6 +449,28 @@ class AuditVerificationIntegrationTests {
         assertThat(finalHead.get("last_record_hash")).isEqualTo(initialHead.get("last_record_hash"));
     }
 
+    @Test
+    @DisplayName("GET /audit/verify reports INTACT and scans all events when archived events are present")
+    void testVerifyChainWithArchivedEvents() throws Exception {
+        List<AppendEventResult> seeded = seedEvents(5);
+
+        jdbcTemplate.update("INSERT INTO audit_event_archive (event_id, policy_ref) VALUES (?, 'retention-test')",
+                seeded.get(1).eventId());
+        jdbcTemplate.update("INSERT INTO audit_event_archive (event_id, policy_ref) VALUES (?, 'retention-test')",
+                seeded.get(3).eventId());
+
+        ResponseEntity<AuditVerificationResponse> response = restTemplate.getForEntity(
+                "/audit/verify", AuditVerificationResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().status()).isEqualTo("INTACT");
+        assertThat(response.getBody().recordsVerified()).isEqualTo(5L);
+        assertThat(response.getBody().headSequenceNo()).isEqualTo(5L);
+        assertThat(response.getBody().lastVerifiedSequenceNo()).isEqualTo(5L);
+        assertThat(response.getBody().violation()).isNull();
+    }
+
     private void withTriggersDisabled(String tableName, Runnable action) {
         jdbcTemplate.execute("ALTER TABLE " + tableName + " DISABLE TRIGGER ALL");
         try {

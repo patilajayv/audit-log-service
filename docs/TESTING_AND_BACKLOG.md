@@ -96,7 +96,7 @@ The full Maven test suite passed under Java 17.0.16 with **125 tests run, 0 fail
 
 ## Milestone 8 validation status
 
-Milestone 8 implemented stateless HTTP Basic authentication, BCrypt password hashing, and role-based access control across all audit service endpoints, with sanitized 401/403 error responses, external credential sourcing, fail-fast production startup validation, and database immutability verification. Milestone 8 changes are currently uncommitted locally pending review.
+Milestone 8 implemented stateless HTTP Basic authentication, BCrypt password hashing, and role-based access control across all audit service endpoints, with sanitized 401/403 error responses, external credential sourcing, fail-fast production startup validation, and database immutability verification. Committed locally as `d69a172`.
 
 ### Automated test coverage
 
@@ -126,6 +126,57 @@ The full Maven test suite passed under Java 17.0.16 with **145 tests run, 0 fail
   - Successful startup in `local` profile with safe local defaults.
 - **Previous baseline tests (125 tests)**: All 18 append WebMvc tests, 7 append integration tests, 9 query WebMvc tests, 10 query integration tests, 3 verify WebMvc tests, 15 verify integration tests, 29 hash unit tests, 18 append service tests, 15 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
 
+## Milestone 9 validation status
+
+Milestone 9 implemented configurable retention and soft-archival metadata management (Scenario B), Flyway V3 schema migration, atomic and idempotent single-event and batch archival endpoints (`POST /audit/archive/{eventId}`, `POST /audit/archive/eligible`), fail-fast production startup validation, default query exclusion (`includeArchived=false`), and chain verification preservation. Milestone 9 changes are uncommitted locally pending review.
+
+### Automated test coverage
+
+The full Maven test suite passed under Java 17.0.16 with **177 tests run, 0 failures, 0 errors, and 0 skipped** (32 new tests added):
+
+- **`AuditArchivalControllerWebMvcTest` (5 tests)**: MockMvc controller slice tests for archival endpoints:
+  - Single event archive returns HTTP 200 with `ArchiveEventResult`.
+  - Batch eligible archive returns HTTP 200 with count and cutoff timestamp.
+  - Non-existent event returns HTTP 404 with sanitized `ErrorResponse`.
+  - Invalid UUID format in route parameter returns HTTP 400 Bad Request.
+  - Unsupported HTTP method (`DELETE /audit/archive/{eventId}`) returns HTTP 405 Method Not Allowed.
+- **`AuditRetentionValidationTests` (6 tests)**: Spring `ApplicationContextRunner` tests verifying retention configuration and startup safety:
+  - Production mode without configured window-days terminates startup (`IllegalStateException`).
+  - Production mode with negative window-days terminates startup (`IllegalStateException`).
+  - Production mode with zero window-days terminates startup (`IllegalStateException`).
+  - Production mode with valid positive window-days boots successfully.
+  - `test` profile defaults to 30 days and boots successfully.
+  - `local` profile defaults to 90 days and boots successfully.
+- **`AuditArchivalServiceIntegrationTests` (9 tests)**: End-to-end service and database integration tests against isolated Testcontainers PostgreSQL 16:
+  - Single event archive creates metadata in `audit_event_archive` with matching `eventId`, UTC `archivedAt`, and policy ref.
+  - Single event archive is strictly idempotent (subsequent call returns `archived: false` with original timestamp).
+  - Archiving a non-existent UUID throws `AuditEventNotFoundException`.
+  - Batch archive archives only events older than the UTC cutoff calculated once per batch.
+  - Batch archive is strictly idempotent (subsequent batch run returns 0 newly archived records).
+  - Hash immutability: `content_hash`, `record_hash`, and `previous_hash` on `audit_event` are verified identical before and after archival.
+  - Trigger immutability: direct `UPDATE`, `DELETE`, and `TRUNCATE` against `audit_event` continue to be blocked by PostgreSQL triggers even when archive rows exist.
+  - Full-chain verification intact: `AuditVerificationService.verifyChain()` confirms `INTACT` across all records before and after archival of intermediate and trailing events.
+  - Retention window validation: batch archival rejects unconfigured, null, zero, or negative retention windows with `IllegalArgumentException`.
+- **`AuditSecurityIntegrationTests` (18 tests, 5 new)**: Security role verification on archival routes:
+  - `POST /audit/archive/{eventId}` unauthenticated returns HTTP 401 with `WWW-Authenticate` header.
+  - `POST /audit/archive/{eventId}` with `AUDITOR` role returns HTTP 403 Forbidden.
+  - `POST /audit/archive/{eventId}` with `AUDIT_WRITER` role succeeds (HTTP 200).
+  - `POST /audit/archive/eligible` unauthenticated returns HTTP 401 with `WWW-Authenticate` header.
+  - `POST /audit/archive/eligible` with `AUDITOR` role returns HTTP 403 Forbidden.
+  - `POST /audit/archive/eligible` with `AUDIT_WRITER` role succeeds (HTTP 200).
+- **`AuditQueryIntegrationTests` (13 tests, 3 new)**: Archival query behavior:
+  - Query with default `includeArchived=false` omits archived records from page results and total count.
+  - Query with `includeArchived=true` includes archived records and exposes populated `archivedAt` timestamps.
+  - Database read-only invariant: querying with archival filters never mutates event or archive tables.
+- **`FlywayMigrationIntegrationTests` (17 tests, 2 new)**: Flyway V3 migration structure and database grants:
+  - Schema inspection confirms `audit_event_archive` foreign key constraint to `audit_event(event_id)`, non-null columns, and index on `archived_at`.
+  - Application role `audit_app` privileges verified: `SELECT` and `INSERT` are permitted, while `UPDATE`, `DELETE`, and `TRUNCATE` are denied by PostgreSQL permission checks.
+- **`AuditVerificationIntegrationTests` (16 tests, 1 new)**:
+  - `testVerifyChainWithArchivedEvents`: Verifies complete-chain verification remains `INTACT` when arbitrary events across the chain are archived.
+- **`AuditEventQueryControllerWebMvcTest` (10 tests, 1 new)**:
+  - Validates `includeArchived` query parameter parsing and response DTO mapping.
+- **Previous baseline tests (145 tests)**: All 18 append WebMvc tests, 7 append integration tests, 9 query WebMvc tests, 10 query integration tests, 3 verify WebMvc tests, 15 verify integration tests, 13 security integration tests, 7 credential validation tests, 29 hash unit tests, 18 append service tests, 15 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -135,10 +186,11 @@ The full Maven test suite passed under Java 17.0.16 with **145 tests run, 0 fail
 5. [x] Implement the event creation REST API (`POST /audit/events`) and validation tests. (Milestone 5)
 6. [x] Implement filtered query API (`GET /audit/events`) and stable pagination. (Milestone 6)
 7. [x] Implement complete-chain verification API (`GET /audit/verify`) and direct-database tampering demonstration tests. (Milestone 7)
-8. [x] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests. (Milestone 8)
-9. [ ] Implement deferred Scenario B archive-metadata migration, archival workflow, redacted projections, and verifiable export (`GET /audit/exports`).
-10. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
-11. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
+8. [x] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests. (Milestone 8, `d69a172`)
+9. [x] Implement Scenario B configurable retention, soft archival (`POST /audit/archive/**`), Flyway V3 archive schema, and query filtering. (Milestone 9)
+10. [ ] Implement remaining Scenario B payload encryption envelopes, key destruction / redacted projections, and verifiable export bundle (`GET /audit/exports`).
+11. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
+12. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
 
 ## Milestone discipline
 

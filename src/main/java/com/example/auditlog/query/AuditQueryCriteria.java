@@ -8,6 +8,10 @@ import java.time.format.DateTimeParseException;
  *
  * <p>All string filters are trimmed; blank values are rejected. Time bounds are parsed to UTC
  * {@link Instant} values and validated such that {@code from <= to}.
+ *
+ * <p>{@code includeArchived} (default {@code false}) controls whether events that have a
+ * corresponding row in {@code audit_event_archive} are returned. When {@code false}, archived
+ * events are excluded from both the total count and the result page.
  */
 public record AuditQueryCriteria(
         String actorId,
@@ -17,7 +21,8 @@ public record AuditQueryCriteria(
         Instant from,
         Instant to,
         int page,
-        int size) {
+        int size,
+        boolean includeArchived) {
 
     public static final int DEFAULT_PAGE = 0;
     public static final int DEFAULT_SIZE = 20;
@@ -44,9 +49,23 @@ public record AuditQueryCriteria(
             String toStr,
             Integer page,
             Integer size) {
+        return of(actorId, resourceType, resourceId, eventType, fromStr, toStr, page, size, false);
+    }
+
+    public static AuditQueryCriteria of(
+            String actorId,
+            String resourceType,
+            String resourceId,
+            String eventType,
+            String fromStr,
+            String toStr,
+            Integer page,
+            Integer size,
+            Boolean includeArchived) {
 
         int resolvedPage = page != null ? page : DEFAULT_PAGE;
         int resolvedSize = size != null ? size : DEFAULT_SIZE;
+        boolean resolvedIncludeArchived = Boolean.TRUE.equals(includeArchived);
 
         String cleanActorId = cleanString(actorId, "actorId");
         String cleanResourceType = cleanString(resourceType, "resourceType");
@@ -58,7 +77,7 @@ public record AuditQueryCriteria(
 
         return new AuditQueryCriteria(
                 cleanActorId, cleanResourceType, cleanResourceId, cleanEventType,
-                from, to, resolvedPage, resolvedSize);
+                from, to, resolvedPage, resolvedSize, resolvedIncludeArchived);
     }
 
     private static String cleanString(String val, String fieldName) {
