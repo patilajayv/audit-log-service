@@ -169,7 +169,51 @@ For this prototype, the service operates as the immutable *Audit Plane*. Upstrea
 - `GET /audit/compliance/account-access/export?accountId={id}` produces a self-contained bundle verifying as `INTACT` via `StandaloneExportVerifier` and `scripts/verify_export.py`. *(Verified in `AuditComplianceIntegrationTests`)*
 - `ROLE_REGULATOR` is authorized for compliance endpoints (200 OK) and strictly forbidden (403 Forbidden) from `/audit/events`, `/audit/exports`, `/audit/verify`, and write/archive/redact endpoints. *(Verified in `AuditSecurityIntegrationTests`)*
 - `ROLE_AUDITOR` is authorized for compliance endpoints; `ROLE_AUDIT_WRITER` is forbidden (403); unauthenticated callers receive 401. *(Verified in `AuditSecurityIntegrationTests`)*
-- All 272 automated tests pass without regression. *(Verified in Maven test run)*
+- All 304 automated tests pass without regression. *(Verified in Maven test run)*
+
+## Engineering Hardening & Production Operationalization (Milestone 14)
+
+### Requirements
+
+- Protect the ingestion endpoint against replay attacks, duplicate submissions, and network retries via client-scoped idempotency.
+- Protect the service against unauthenticated Denial of Service (DoS) and authenticated credential exhaustion attacks via multi-tier rate limiting.
+- Establish an automated CI/CD pipeline with continuous integration and JaCoCo code coverage quality gates.
+
+### Implementation Decisions
+
+1. **Two-Tier Rate Limiting Architecture**:
+   - **Pre-Authentication IP Limiting (`PreAuthIpRateLimitingFilter`)**: Intercepts unauthenticated connection requests by IP address (default: 100 req/min, burst 20). Protects against unauthenticated brute-force credential stuffing and DoS attacks.
+   - **Post-Authentication Principal Limiting (`PostAuthPrincipalRateLimitingFilter`)**: Enforces rate limits per authenticated principal (default: 60 req/min, burst 10). Protects against compromised API keys or runaway upstream scripts.
+   - **Bounded `TokenBucketRateLimiter`**: Uses fine-grained per-key locks, nanosecond monotonic clock accounting (`System.nanoTime()`), and periodic background eviction of idle buckets to prevent heap memory exhaustion.
+   - **Sanitized Throttling Response**: Emits HTTP 429 `Too Many Requests` with a standard `Retry-After: 1` header and sanitized JSON `ErrorResponse`.
+2. **Client-Scoped Idempotency Protection**:
+   - Supported via `Idempotency-Key` or `X-Idempotency-Key` header on `POST /audit/events`.
+   - Flyway migration `V5__add_audit_idempotency.sql` creates `audit_idempotency_key` table keyed by `(client_id, idempotency_key)` with `SELECT, INSERT` privileges granted to `audit_app`.
+   - Request payloads are canonically fingerprinted using RFC 8785 JSON Canonicalization Scheme (JCS) and hashed with SHA-256 over `{actorId, eventType, payload, resourceId, resourceType, sourceTimestamp}`.
+   - Transactional head-locking protocol: In `AuditAppendService.appendWithIdempotency()`, under database transaction with chain-head row locking (`SELECT FOR UPDATE FROM audit_chain_head WHERE chain_id = 1`), checks existing key:
+     - Exact match: returns original `AuditEventResponse` with HTTP 200 OK.
+     - Payload mismatch: aborts with sanitized HTTP 409 Conflict.
+     - New key: executes atomic event insert, chain-head advancement, and idempotency key recording, satisfying trigger `trg_audit_chain_head_advance` and returning HTTP 201 Created.
+3. **CI/CD Pipeline & Code Coverage Enforcement**:
+   - Official Apache Maven 3.9.9 wrapper (`mvnw`, `mvnw.cmd`).
+   - GitHub Actions automated CI pipeline (`.github/workflows/ci.yml`) executing on every push and pull request against isolated Testcontainers PostgreSQL.
+   - Automated Dependabot configuration (`.github/dependabot.yml`) for weekly Maven and Actions dependency updates.
+   - JaCoCo coverage quality gate configured in `pom.xml` (`jacoco:check`) enforcing:
+     - Line coverage: $\ge 85\%$ (actual: $89.78\%$)
+     - Instruction coverage: $\ge 85\%$ (actual: $89.91\%$)
+     - Branch coverage: $\ge 70\%$ (actual: $72.27\%$)
+4. **Production Architecture Boundaries**:
+   - **Distributed Rate Limiting**: In a multi-node Kubernetes cluster, rate limiting is terminated at the ingress/API gateway tier (e.g. Envoy, Kong) or backed by a distributed cache (e.g. Redis token bucket). `RemoteIpFilter` trusted proxy CIDRs must be configured to prevent header spoofing via untrusted `X-Forwarded-For`.
+   - **Network & TLS Boundary**: Service container runs HTTP internally within a private VPC / service mesh (pod-to-pod mTLS); external TLS 1.3 is terminated at the ingress controller.
+   - **External Trust Anchors**: Mathematical proof of immutability against a database superuser who could alter tables and recompute all hashes requires external trust anchors, such as RFC 6962 Certificate Transparency style signed tree heads (STHs), RFC 3161 cryptographic timestamping, or periodic publishing of signed checkpoints to WORM storage (AWS S3 Object Lock) or a public ledger.
+
+### Acceptance Criteria
+
+- Initial append with idempotency key returns HTTP 201 Created. *(Verified in `AuditSecurityIntegrationTests`)*
+- Replay append with identical key and payload returns HTTP 200 OK with original event details. *(Verified in `AuditSecurityIntegrationTests`)*
+- Replay append with identical key but mismatched payload returns HTTP 409 Conflict. *(Verified in `AuditSecurityIntegrationTests`)*
+- Exceeding burst token allowance returns HTTP 429 Too Many Requests with `Retry-After: 1`. *(Verified in `RateLimitingFilterTest` and `RateLimitingSecurityIntegrationTests`)*
+- All 304 automated tests pass and JaCoCo coverage metrics satisfy quality gate thresholds in automated CI. *(Verified in local test run and GitHub Actions CI)*
 
 ## Cross-cutting delivery requirements
 

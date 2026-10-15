@@ -394,3 +394,30 @@ This log records AI-assisted work honestly. Each future entry will identify the 
 - **Validation:**
   - `git diff --check` passed cleanly with 0 whitespace errors.
   - Confirmed 0 modifications to application source code, tests, configuration, or Flyway migrations.
+
+## 2026-10-16 - Milestone 14 engineering hardening, rate limiting, idempotency, and CI/CD verification
+
+- **Task:** Implement two-tier token-bucket rate limiting (pre-auth IP limiter and post-auth principal limiter), client idempotency protection with canonical request hashing and chain-head locking, Flyway V5 schema migration, official Apache Maven 3.9.9 wrapper, automated GitHub Actions CI pipeline, and JaCoCo coverage quality gates.
+- **AI contribution:**
+  - Designed and implemented `TokenBucketRateLimiter` with bounded capacity, per-bucket fine-grained locking, nano-second token replenishment, and atomic eviction.
+  - Implemented `PreAuthIpRateLimitingFilter` (100 req/min, burst 20) and `PostAuthPrincipalRateLimitingFilter` (60 req/min, burst 10) emitting sanitized HTTP 429 `ErrorResponse` with `Retry-After: 1`.
+  - Authored Flyway migration `V5__add_audit_idempotency.sql` introducing `audit_idempotency_record` table.
+  - Implemented client idempotency support via `Idempotency-Key` / `X-Idempotency-Key` headers in `AuditEventController` and `AuditAppendService.appendWithIdempotency()`, using RFC 8785 canonical request hashing and database chain-head locking (`SELECT FOR UPDATE`).
+  - Diagnosed and resolved PostgreSQL trigger ordering and transaction boundary failures where `audit_event` insert trigger `trg_audit_chain_head_advance` required head advancement within the same transaction.
+  - Resolved Spring MVC mock verification mismatches and payload size / unsafe integer validation error translations.
+  - Configured Apache Maven 3.9.9 wrapper (`mvnw`, `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`).
+  - Configured GitHub Actions CI pipeline (`.github/workflows/ci.yml`) and Dependabot dependency management (`.github/dependabot.yml`).
+  - Configured JaCoCo quality gate rules in `pom.xml` (line 85%, instruction 85%, branch 70%).
+  - Added comprehensive test suites: `RateLimitingFilterTest` (15 tests), `RateLimitingSecurityIntegrationTests` (1 test), and updated `AuditSecurityIntegrationTests` (41 tests).
+- **Engineer oversight:**
+  - Audited and rejected global lock contention in rate limiting; enforced per-bucket fine-grained synchronization with safe eviction.
+  - Enforced monotonic clock usage (`System.nanoTime()`) for token replenishment instead of wall-clock time to prevent drift during NTP adjustments.
+  - Enforced strict RFC 8785 canonical request hashing for idempotency payload comparison.
+  - Verified and corrected transaction sequencing to satisfy the PostgreSQL trigger invariant (`audit_event insert must advance the chain head in the same transaction`).
+  - Maintained strict Git branch hygiene: developed and validated on branch `engineering-hardening`, verified remote state, pushed commit `6bce2b3`, and approved merge into `main` as commit `497c7a7`.
+- **Decision:** Reviewed and approved by the engineer. Committed as `6bce2b3` on branch `engineering-hardening` and merged into `main` as `497c7a7`.
+- **Validation:**
+  - Full Maven test suite passed: **304 tests run, 0 failures, 0 errors, 0 skipped** across 25 test classes.
+  - JaCoCo coverage verified: **89.91% instruction coverage**, **89.78% line coverage**, and **72.27% branch coverage**, exceeding all configured quality gate thresholds.
+  - GitHub Actions CI workflow passed on merge commit `497c7a7` with Testcontainers PostgreSQL 16 and automated artifact generation.
+  - `git diff --check` passed cleanly with 0 whitespace errors.

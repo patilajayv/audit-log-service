@@ -313,6 +313,40 @@ On 2026-10-15, the developer manually executed and verified the complete 8-step 
 7. **Regulator Compliance & Supervisory Meta-Events (Step 7):** Queried account access via `GET /audit/compliance/account-access?accountId=ACCT-987654` with `local_regulator` (`HTTP 200`, `totalElements: 4`); verified automatic append of `REGULATORY_AUDIT_ACCESSED` supervisory event at sequence 6 with `resourceType = "COMPLIANCE_AUDIT"`; confirmed supervisory events are excluded from subsequent account query results (preventing query recursion loops).
 8. **Security & Least Privilege (Step 8):** Verified sanitized `HTTP 401 Unauthorized` with `WWW-Authenticate: Basic realm="AuditLogService"`, `HTTP 403 Forbidden` for regulator accessing internal audit log, and `HTTP 403 Forbidden` on unmapped routes.
 
+## Milestone 14 engineering hardening, rate limiting, and idempotency validation status
+
+Milestone 14 introduced production-grade engineering hardening, two-tier token-bucket rate limiting, client-scoped idempotency protection, and automated CI/CD pipeline infrastructure:
+
+1. **Two-Tier Token-Bucket Rate Limiting**:
+   - `PreAuthIpRateLimitingFilter`: Evaluates incoming IP requests prior to authentication challenge (default: 100 req/min, burst 20).
+   - `PostAuthPrincipalRateLimitingFilter`: Evaluates authenticated principals (default: 60 req/min, burst 10).
+   - `TokenBucketRateLimiter`: Thread-safe bounded token bucket using fine-grained per-key locks, monotonic clock calculations (`System.nanoTime()`), and atomic eviction of idle buckets.
+   - Throttled requests emit sanitized HTTP 429 `Too Many Requests` with a `Retry-After: 1` header.
+2. **Client-Scoped Idempotency Protection**:
+   - Implemented `Idempotency-Key` and `X-Idempotency-Key` support on `POST /audit/events`.
+   - Flyway migration `V5__add_audit_idempotency.sql` introduces `audit_idempotency_record` table.
+   - Idempotency hashing uses RFC 8785 canonical JSON over `{actorId, eventType, payload, resourceId, resourceType, sourceTimestamp}`.
+   - Transactional head-locking protocol (`AuditAppendService.appendWithIdempotency`): locks chain-head row (`SELECT FOR UPDATE`), checks existing key, verifies canonical request hash, and executes atomic append and head advancement within a single transaction, fully satisfying the PostgreSQL trigger invariant (`trg_audit_chain_head_advance`).
+   - Identical replays return HTTP 200 with the original event details; mismatched payloads for the same idempotency key return sanitized HTTP 409 Conflict.
+3. **Automated CI/CD Infrastructure & Quality Gate**:
+   - Official Apache Maven 3.9.9 wrapper (`mvnw`, `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties`).
+   - GitHub Actions CI workflow (`.github/workflows/ci.yml`) testing against isolated Testcontainers PostgreSQL 16.
+   - Dependabot dependency monitoring (`.github/dependabot.yml`) for Maven and GitHub Actions.
+   - JaCoCo coverage quality gate configured in `pom.xml` enforcing 85% line coverage, 85% instruction coverage, and 70% branch coverage.
+
+### Automated test coverage
+
+The full Maven test suite passed with **304 tests run, 0 failures, 0 errors, and 0 skipped** across 25 test classes:
+
+- **`RateLimitingFilterTest` (15 tests, NEW in Milestone 14)**: Unit and concurrency tests for `TokenBucketRateLimiter`, per-key locking, capacity bounds, eviction, burst replenishment, and thread safety.
+- **`RateLimitingSecurityIntegrationTests` (1 test, NEW in Milestone 14)**: End-to-end integration test verifying authenticated principal burst allowance and subsequent HTTP 429 throttling with `Retry-After`.
+- **`AuditSecurityIntegrationTests` (41 tests, 3 updated/added in Milestone 14)**: Verifies idempotency flows (`idempotentAppend_returns201Then200OnReplay`, `idempotentAppend_withMismatchedPayloadReturns409Conflict`, and writer append under rate-limiting filter chain).
+- **Previous baseline tests (263 tests)**: All 263 previously existing tests continue to pass with 0 regressions.
+- **JaCoCo Coverage Metrics**:
+  - Instruction coverage: **89.91%** (6,653 / 7,400 instructions)
+  - Line coverage: **89.78%** (1,572 / 1,751 lines)
+  - Branch coverage: **72.27%** (503 / 696 branches)
+
 ## Prioritized backlog
 
 1. [x] Add detailed requirements, architecture, threat model, and acceptance criteria documentation. (Milestone 2)
@@ -328,6 +362,7 @@ On 2026-10-15, the developer manually executed and verified the complete 8-step 
 11. [x] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains. (Milestone 11)
 12. [x] Implement Scenario C regulator auditing of client account access, compliance query and constrained export endpoints, fail-closed supervisory auditing, and least-privilege authorization. (Milestone 12)
 13. [x] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation. (Milestone 13)
+14. [x] Implement two-tier rate limiting, client idempotency protection, Flyway V5 schema, and CI/CD pipeline with JaCoCo quality gate. (Milestone 14)
 
 ## Milestone discipline
 

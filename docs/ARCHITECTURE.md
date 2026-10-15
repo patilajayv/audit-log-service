@@ -30,14 +30,24 @@ No `PUT`, `PATCH`, or `DELETE` audit-event endpoint will exist. Unauthenticated 
 
 ### Write API protocol (`POST /audit/events`)
 
-The write API is implemented by `AuditEventController` and protected by defensive servlet-level and controller-advice filters:
+The write API is implemented by `AuditEventController` and protected by defensive servlet-level filters, rate limiters, and controller-advice exception mappers:
 
 1. **Size enforcement (`RequestBodySizeLimitFilter`)**: Registered with `HIGHEST_PRECEDENCE`. Evaluates declared `Content-Length` and wraps chunked/streaming input streams with a byte counter. Bodies exceeding 1 MiB (1,048,576 bytes) are aborted with HTTP 413 before deserialization or append invocation.
-2. **Strict duplicate key detection**: Configured globally in Jackson (`JsonParser.Feature.STRICT_DUPLICATE_DETECTION`). Requests with duplicate JSON keys at the root level or within nested `payload` objects are rejected with HTTP 400.
-3. **Payload validation**: Null or non-object payloads and integers outside safe IEEE-754 range $[-(2^{53}-1), 2^{53}-1]$ are rejected with HTTP 400.
-4. **Timestamp normalization**: Omitted timestamps default to `null`. Offset-bearing timestamps (e.g. `+02:00`) are parsed to UTC `Instant` and normalized to millisecond precision (`ChronoUnit.MILLIS`).
-5. **Delegation**: Delegates directly to transactional `AuditAppendService.append(request)`.
-6. **Error handling and sanitization (`AuditControllerAdvice`)**: Maps handled exception categories to appropriate HTTP status codes: client syntax and validation failures (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `IllegalArgumentException`) to HTTP 400; not found errors (`AuditEventNotFoundException`) to HTTP 404; body size limit exceedance (`PayloadTooLargeException`) to HTTP 413; media type mismatches (`HttpMediaTypeNotSupportedException`) to HTTP 415; unsupported methods (`HttpRequestMethodNotSupportedException`) to HTTP 405; and chain-head lock contention (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `QueryTimeoutException`) to HTTP 503 with a `Retry-After: 1` header. For database failures (`DataAccessException`, `SQLException`) and unexpected errors (`Exception`), it emits sanitized generic HTTP 500 responses (`"An internal database error occurred while recording the audit event."` or `"An internal error occurred while processing the audit event."`), actively suppressing SQL syntax, table names, constraint details, and stack traces. Operational logs record correlation IDs, `eventId`, and `sequenceNo`, while omitting sensitive event `payload`, `actorId`, and `resourceId` values.
+2. **Pre-authentication IP rate limiting (`PreAuthIpRateLimitingFilter`)**: Intercepts requests prior to authentication challenge. Enforces a token-bucket allowance (default: 100 req/min, burst 20). Excess requests are aborted with sanitized HTTP 429 `Too Many Requests` and a `Retry-After: 1` header.
+3. **Authentication & authorization (`SecurityConfiguration`)**: Stateless HTTP Basic authentication verifies credentials against `BCryptPasswordEncoder`. Requires `ROLE_AUDIT_WRITER` (401 unauthenticated, 403 insufficient role).
+4. **Post-authentication principal rate limiting (`PostAuthPrincipalRateLimitingFilter`)**: Enforces per-principal metering (default: 60 req/min, burst 10) to prevent authorized credential abuse. Throttled callers receive sanitized HTTP 429 with `Retry-After: 1`.
+5. **Strict duplicate key detection**: Configured globally in Jackson (`JsonParser.Feature.STRICT_DUPLICATE_DETECTION`). Requests with duplicate JSON keys at the root level or within nested `payload` objects are rejected with HTTP 400.
+6. **Payload validation**: Null or non-object payloads and integers outside safe IEEE-754 range $[-(2^{53}-1), 2^{53}-1]$ are rejected with HTTP 400.
+7. **Timestamp normalization**: Omitted timestamps default to `null`. Offset-bearing timestamps (e.g. `+02:00`) are parsed to UTC `Instant` and normalized to millisecond precision (`ChronoUnit.MILLIS`).
+8. **Client idempotency evaluation (`AuditAppendService.appendWithIdempotency`)**:
+   - Evaluates optional `Idempotency-Key` or `X-Idempotency-Key` header (UUID format, max 128 chars).
+   - Computes an RFC 8785 canonical SHA-256 request hash over `{actorId, eventType, payload, resourceId, resourceType, sourceTimestamp}`.
+   - Executes under database transaction with chain-head row locking (`SELECT FOR UPDATE FROM audit_chain_head WHERE chain_id = 1`):
+     - If `(client_id, idempotency_key)` exists in `audit_idempotency_key` and stored `request_hash` matches: returns original `AuditEventResponse` with HTTP 200 OK.
+     - If `(client_id, idempotency_key)` exists with a different `request_hash`: throws `IdempotencyConflictException`, mapped by `AuditControllerAdvice` to sanitized HTTP 409 Conflict.
+     - If key does not exist: inserts into `audit_event`, updates `audit_chain_head`, and records the key in `audit_idempotency_key` atomically in the same transaction, satisfying the PostgreSQL trigger invariant (`trg_audit_chain_head_advance`) and returning HTTP 201 Created.
+9. **Delegation without idempotency**: If no idempotency header is supplied, delegates directly to transactional `AuditAppendService.append(request)` (locks chain head, inserts event, advances head, returns HTTP 201).
+10. **Error handling and sanitization (`AuditControllerAdvice`)**: Maps handled exception categories to appropriate HTTP status codes: client syntax and validation failures (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, `IllegalArgumentException`) to HTTP 400; not found errors (`AuditEventNotFoundException`) to HTTP 404; idempotency conflict (`IdempotencyConflictException`) to HTTP 409; body size limit exceedance (`PayloadTooLargeException`) to HTTP 413; media type mismatches (`HttpMediaTypeNotSupportedException`) to HTTP 415; unsupported methods (`HttpRequestMethodNotSupportedException`) to HTTP 405; rate limiting throttles to HTTP 429; and chain-head lock contention (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `QueryTimeoutException`) to HTTP 503 with a `Retry-After: 1` header. For database failures (`DataAccessException`, `SQLException`) and unexpected errors (`Exception`), it emits sanitized generic HTTP 500 responses (`"An internal database error occurred while recording the audit event."` or `"An internal error occurred while processing the audit event."`), actively suppressing SQL syntax, table names, constraint details, and stack traces. Operational logs record correlation IDs, `eventId`, and `sequenceNo`, while omitting sensitive event `payload`, `actorId`, and `resourceId` values.
 
 ## Data model
 
@@ -96,6 +106,22 @@ Scenario B structured payload redaction metadata and lifecycle enforcement (Flyw
 Indexes support `event_id`, `redacted_at`, and `status`. A partial index on `audit_event ((payload->>'redactionOperationId')) WHERE event_type = 'PAYLOAD_REDACTED'` accelerates pre-append reconciliation discovery.
 The table is owned by `audit_migrator`. The application role `audit_app` is granted narrow column privileges: `SELECT, INSERT` on all columns, and `UPDATE (status, redacted_at, meta_audit_sequence_no)` only. Any attempt by `audit_app` to mutate immutable metadata columns (`reason`, `requested_by`, `field_path`, `event_id`, etc.) is blocked by PostgreSQL's permission model (`42501 permission denied`).
 Furthermore, `trg_audit_event_redaction_lifecycle` permanently seals completed records (disallowing any mutation once `COMPLETED`), validates monotonic state transitions, and enforces a non-null `meta_audit_sequence_no` before transitioning to `COMPLETED`. A delete trigger (`trg_audit_event_redaction_no_delete`) blocks `DELETE` and `TRUNCATE` operations even for administrative roles.
+
+### `audit_idempotency_key`
+
+Milestone 14 client idempotency tracking keyed by `(client_id, idempotency_key)` (Flyway `V5__add_audit_idempotency.sql`).
+
+| Column | Type | Purpose |
+| --- | --- | --- |
+| `idempotency_key` | `VARCHAR(256) NOT NULL` | Client-supplied unique transaction/request identifier. |
+| `client_id` | `VARCHAR(128) NOT NULL` | Authenticated principal name scoping the idempotency namespace. |
+| `request_hash` | `VARCHAR(64) NOT NULL` | RFC 8785 canonical SHA-256 hash of the append request payload. |
+| `event_id` | `UUID NOT NULL` | References `audit_event(event_id)` with `ON DELETE RESTRICT`. |
+| `created_at` | `TIMESTAMPTZ NOT NULL` | Service-assigned UTC timestamp when the key was recorded. |
+
+Primary key is `(client_id, idempotency_key)`. An index on `created_at` supports TTL expiration and pruning.
+The table is owned by `audit_migrator`. The application role `audit_app` is granted `SELECT, INSERT` privileges only (no `UPDATE`, `DELETE`, or `TRUNCATE`).
+Rows in `audit_idempotency_key` are inserted atomically with `audit_event` and `audit_chain_head` advancement under a single transaction.
 
 ## Hash chain
 
@@ -382,4 +408,46 @@ The service provides dedicated compliance reporting and export capabilities for 
 
 ## Threat model and limitations
 
-The design detects accidental changes and unauthorized edits that do not also rewrite every affected hash and the chain head. A database administrator with sufficient privileges could rewrite the entire local chain and recompute hashes. A production claim against that threat requires a periodically signed checkpoint stored beyond PostgreSQL control, such as an independently controlled immutable store or key-management service.
+### 1. Ledger Integrity & Trust Boundary Analysis
+
+The cryptographic hash chain implemented by the Audit Log Service establishes strong mathematical guarantees:
+- **Tamper Evidence**: Any modification to an event payload, stored content hash, genesis hash, intermediate link, sequence ordering, or chain head pointer produces an immediate mismatch detectable by `GET /audit/verify` and export bundle verifiers.
+- **Append-Only Enforcement**: PostgreSQL triggers (`trg_audit_event_no_update_delete`) and restrictive role grants (`audit_app` granted `SELECT, INSERT` only) prevent modification or deletion through standard application workflows.
+
+#### The Privileged DBA Superuser Threat Model
+- **What Internal Chains Prove**: The internal chain proves that all committed records from genesis to `audit_chain_head` are cryptographically linked and unmodified relative to the stored chain-head pointer.
+- **What Internal Chains Cannot Prove**: A privileged database administrator (DBA) with PostgreSQL superuser permissions (`postgres`) has complete control over the storage engine. A superuser can:
+  1. Temporarily disable triggers (`ALTER TABLE audit_event DISABLE TRIGGER ALL;`).
+  2. Modify a historical row's payload or delete a target sequence.
+  3. Sequentially recompute all subsequent `content_hash`, `previous_hash`, and `record_hash` values forward to the tail.
+  4. Update `audit_chain_head.last_record_hash` to match the newly rewritten tail.
+  5. Re-enable triggers (`ALTER TABLE audit_event ENABLE TRIGGER ALL;`).
+  Because `GET /audit/verify` relies on the database's own `audit_chain_head` as its local trust anchor, it would evaluate the rewritten chain as `status: INTACT`.
+
+#### Production Mitigation: External Trust Anchors
+To defend against superuser history rewriting, enterprise production deployments must publish signed checkpoints beyond the administrative perimeter of the database:
+1. **Cryptographic Transparency Logs (RFC 6962)**: Structure ledger checkpoints into an append-only Merkle Tree where Signed Tree Heads (STHs) are published to independent auditors, providing logarithmic inclusion and consistency proofs.
+2. **External Timestamping Authority (RFC 3161 TSA)**: Periodically submit the latest `(sequence_no, record_hash)` to an external RFC 3161 compliant timestamping authority to obtain cryptographically verifiable, third-party signed timestamp tokens.
+3. **Write-Once-Read-Many (WORM) Storage**: Mirror chain-head checkpoints and export bundles to cloud storage configured with strict compliance-mode object locking (e.g., AWS S3 Object Lock in Compliance Mode), where retention periods cannot be shortened or deleted even by the AWS account root user.
+4. **Public Distributed Ledger Anchoring**: Periodically anchor the state root hash to a public or consortium blockchain, creating an immutable, globally observable timestamped witness.
+
+### 2. Key Management & Crypto-Shredding Lifecycle
+
+- **Prototype Scope**: The prototype uses `InMemoryKeyManager` to store Data Encryption Keys (DEKs) in JVM memory for automated test validation.
+- **Production Scope**: Enterprise deployments must integrate `KeyManager` with an external Hardware Security Module (HSM) or managed Key Management Service (e.g., AWS KMS, HashiCorp Vault, Azure Key Vault):
+  - **Envelope Encryption**: Master Key Encryption Keys (KEKs) remain securely inside the HSM. DEKs are generated per-record, encrypted under the KEK, and stored alongside the ciphertext envelope.
+  - **Irrevocable Destruction**: True crypto-shredding requires calling the KMS key destruction API (e.g., `ScheduleKeyDeletion` or `DestroyKey`), rendering stored ciphertext permanently indecipherable across all database backups, read replicas, and write-ahead logs (WAL).
+  - **Audit Trail**: KMS access and destruction operations generate independent CloudTrail/audit logs outside the database DBA's jurisdiction.
+
+### 3. Rate Limiting & Distributed Topologies
+
+- **Node-Local Token Bucket**: The implemented `TokenBucketRateLimiter` provides thread-safe, nano-second token replenishment and bounded capacity per JVM node.
+- **Distributed Gateway Tier**: In a multi-replica Kubernetes deployment behind a load balancer, node-local token buckets do not coordinate token consumption across pods. Production systems must:
+  - Enforce global edge rate limiting at the ingress/API gateway layer (e.g., Envoy rate-limit service, Kong) before traffic reaches application pods.
+  - Or back the application rate-limiting filters with a shared, low-latency distributed store (e.g., Redis cluster using Redis cell or Lua token-bucket scripts).
+- **Reverse Proxy IP Trust**: In production, `PreAuthIpRateLimitingFilter` extracts client IPs via `RemoteIpFilter`. The filter must be configured with an explicit list of trusted internal proxy CIDRs (`internalProxies`) to prevent malicious callers from spoofing their identity through untrusted `X-Forwarded-For` request headers.
+
+### 4. TLS Termination & Network Perimeter
+
+- **Internal Container Boundary**: The service container listens on HTTP internally, architected for deployment within a private VPC or Kubernetes service mesh (e.g., Istio, Linkerd) where sidecars manage pod-to-pod mutual TLS (mTLS) transparently.
+- **Edge Termination**: External TLS 1.3 termination, cipher suite negotiation, and client certificate validation occur at the edge ingress controller or reverse proxy (e.g., AWS Application Load Balancer, Cloudflare), isolating network transport encryption from core application business logic.

@@ -2,7 +2,7 @@
 
 This repository contains a production-grade Java 17 and Spring Boot 3 prototype for the Charles Schwab Audit Log Service engineering assessment.
 
-The service implements an append-only, tamper-evident audit ledger with cryptographic hash chains (RFC 8785 JCS canonicalization and SHA-256), multi-criteria filtering with stable pagination, complete-chain integrity verification, role-based access control, soft archival retention, structured payload redaction (crypto-shredding), self-contained verifiable bulk exports, and regulator auditing of client account access.
+The service implements an append-only, tamper-evident audit ledger with cryptographic hash chains (RFC 8785 JCS canonicalization and SHA-256), multi-criteria filtering with stable pagination, complete-chain integrity verification, role-based access control, two-tier token-bucket rate limiting, client-scoped idempotency protection, soft archival retention, structured payload redaction (crypto-shredding), self-contained verifiable bulk exports, regulator auditing of client account access, and automated CI/CD pipeline verification.
 
 ## Assessment Scenarios & Milestones
 
@@ -41,7 +41,7 @@ A complete, interview-ready demonstration guide and live execution log is availa
 
 | Endpoint | HTTP Method | Role Required | Purpose |
 | --- | --- | --- | --- |
-| `/audit/events` | `POST` | `ROLE_AUDIT_WRITER` | Ingests append-only audit event (1 MiB limit, strict JSON duplicate-key rejection). |
+| `/audit/events` | `POST` | `ROLE_AUDIT_WRITER` | Ingests append-only audit event (1 MiB limit, strict JSON duplicate-key rejection). Supports optional `Idempotency-Key` / `X-Idempotency-Key` headers (HTTP 201 on initial append, HTTP 200 on exact replay, HTTP 409 Conflict on payload mismatch). |
 | `/audit/events` | `GET` | `ROLE_AUDITOR` | Queries events by actor, resource, event type, time range, with pagination. Masks redacted fields as `"[REDACTED]"`. |
 | `/audit/verify` | `GET` | `ROLE_AUDITOR` | Walks complete chain from genesis to head; reports `INTACT` or first inconsistency. |
 | `/audit/archive/{eventId}` | `POST` | `ROLE_AUDIT_WRITER` | Archives an individual event by ID into separate metadata (idempotent). |
@@ -51,63 +51,63 @@ A complete, interview-ready demonstration guide and live execution log is availa
 | `/audit/compliance/account-access` | `GET` | `ROLE_REGULATOR`, `ROLE_AUDITOR` | Queries account access events (`resourceType = 'ACCOUNT'`); commits supervisory audit event. |
 | `/audit/compliance/account-access/export` | `GET` | `ROLE_REGULATOR`, `ROLE_AUDITOR` | Exports verifiable bundle scoped strictly to specified account; commits supervisory export event. |
 
-All unmapped routes and unauthorized methods are denied by default (`.anyRequest().denyAll()`). Unauthenticated requests receive a sanitized HTTP 401 `ErrorResponse` with `WWW-Authenticate: Basic realm="AuditLogService"`. Insufficiently privileged requests receive a sanitized HTTP 403 `ErrorResponse` without authentication challenge.
+All unmapped routes and unauthorized methods are denied by default (`.anyRequest().denyAll()`). Unauthenticated requests receive a sanitized HTTP 401 `ErrorResponse` with `WWW-Authenticate: Basic realm="AuditLogService"`. Insufficiently privileged requests receive a sanitized HTTP 403 `ErrorResponse` without authentication challenge. Excessive requests exceeding configured token-bucket limits receive a sanitized HTTP 429 `ErrorResponse` with a `Retry-After: 1` header (Pre-auth IP tier: 100 req/min, burst 20; Post-auth principal tier: 60 req/min, burst 10).
 
 ## Prerequisites
 
 - **Java 17 JDK** (tested with Eclipse Adoptium OpenJDK 17.0.16)
-- **Maven 3.9+**
+- **Maven 3.9+** (or included `./mvnw` Apache Maven 3.9.9 wrapper)
 - **Docker Desktop** or compatible container runtime for Testcontainers and Compose
 - **Python 3.9+** (optional, standard library only, for standalone export bundle verifier)
 
 ## Build and Test
 
-Run the full suite of **272 unit and integration tests across 23 test classes**:
+Run the full suite of **304 unit and integration tests across 25 test classes**:
 
 ```bash
-mvn test
+./mvnw clean test
 ```
 
 ### Test Suite Structure
 
 The test suite requires zero pre-existing database setup; all database integration tests use isolated, ephemeral Testcontainers PostgreSQL 16 instances:
 
-- **Canonical Hashing & Cryptography (35 tests)**:
+- **Canonical Hashing & Cryptography (34 tests)**:
   - `AuditHashServiceTest` (29 tests): Hardcoded SHA-256 test vectors verified against external RFC 8785 reference oracles; safe integer boundaries, non-finite float rejection, negative zero normalization.
-  - `AuditCryptoServiceTest` (6 tests): AES-256-GCM envelope encryption/decryption, IV handling, authentication tag verification, key destruction, and idempotent destruction.
-- **Append & Ingestion (48 tests)**:
-  - `AuditEventControllerWebMvcTest` (18 tests): MockMvc slice tests for body size limit (HTTP 413), duplicate key rejection (HTTP 400), invalid types, timestamp parsing, lock contention (HTTP 503 with `Retry-After: 1`), and error sanitization.
-  - `AuditAppendServiceIntegrationTests` (18 tests): Genesis append, hash linkage, rollback on trigger failure, and concurrent append serialization against Testcontainers PostgreSQL.
+  - `AuditCryptoServiceTest` (5 tests): AES-256-GCM envelope encryption/decryption, IV handling, authentication tag verification, key destruction, and idempotent destruction.
+- **Append & Ingestion (56 tests)**:
+  - `AuditEventControllerWebMvcTest` (26 tests): MockMvc slice tests for body size limit (HTTP 413), duplicate key rejection (HTTP 400), invalid types, timestamp parsing, lock contention (HTTP 503 with `Retry-After: 1`), idempotency header validation, and error sanitization.
+  - `AuditAppendServiceIntegrationTests` (23 tests): Genesis append, hash linkage, rollback on trigger failure, idempotency handling, and concurrent append serialization against Testcontainers PostgreSQL.
   - `AuditEventControllerIntegrationTests` (7 tests): Full HTTP-to-database integration tests including multi-threaded concurrent appends with contiguous sequence numbers.
-  - `AuditAppendConcurrencyIntegrationTests` (3 tests): Application-level concurrent append stress testing.
-  - `CanonicalJsonUtilTests` (2 tests): JCS canonicalization utility edge cases.
 - **Query & Pagination (24 tests)**:
   - `AuditEventQueryControllerWebMvcTest` (10 tests): MockMvc slice tests for pagination bounds, filter binding, and timestamp range validation.
   - `AuditQueryIntegrationTests` (14 tests): Multi-criteria filter intersection, stable pagination ordering (`sequence_no ASC`), soft-archival inclusion/exclusion, and read-only database invariant assertions.
-- **Chain Verification & Tamper Detection (22 tests)**:
-  - `AuditEventVerifyControllerWebMvcTest` (6 tests): MockMvc slice tests for intact and corrupted responses.
+- **Chain Verification & Tamper Detection (19 tests)**:
+  - `AuditEventVerifyControllerWebMvcTest` (3 tests): MockMvc slice tests for intact and corrupted responses.
   - `AuditVerificationIntegrationTests` (16 tests): Full-chain verification against empty chain, single event, multi-event, and 10 specific administrative tampering scenarios (payload alteration, content hash modification, genesis hash change, middle link alteration, record hash modification, middle deletion, first deletion, trailing deletion, chain head modification).
-- **Archival & Retention (14 tests)**:
+- **Archival & Retention (20 tests)**:
   - `AuditArchivalControllerWebMvcTest` (5 tests): MockMvc slice tests for single and batch archival routes.
   - `AuditArchivalServiceIntegrationTests` (9 tests): Idempotent single/batch archival, cutoff evaluation, hash immutability, and zero false-positive chain verification.
-- **Redaction & Crypto-Shredding (25 tests)**:
-  - `AuditRedactionControllerWebMvcTest` (8 tests): MockMvc slice tests for redaction requests, parameter validation, and KMS error translation.
-  - `AuditRedactionIntegrationTests` (17 tests): Legacy plaintext soft-masking, encrypted envelope crypto-shredding, `PAYLOAD_REDACTED` meta-event append, exactly-once reconciliation discovery, and concurrent redaction serialization.
-- **Export Bundles & Independent Verification (53 tests)**:
-  - `AuditExportControllerWebMvcTest` (9 tests): MockMvc slice tests for actor/resource mutual exclusivity, validation, and bounded limit rejection (HTTP 413).
-  - `AuditExportIntegrationTests` (15 tests): Repeatable-read snapshot consistency, witness generation, soft-archived event inclusion, crypto-shredded envelope retention, and Java/Python verifier execution.
-  - `StandaloneExportVerifierTest` (44 tests): Verifier unit tests covering valid bundles, tampered payloads, sequence gaps, witness hash tampering, chain head tampering, filter mismatches, legacy masked bundles (`PARTIALLY_VERIFIED_REDACTED`), sequence range bounds `[1, headSeq]`, duplicate sequence rejection, and Python script parity.
+  - `AuditRetentionValidationTests` (6 tests): Production configuration validation for retention window settings.
+- **Redaction & Crypto-Shredding (15 tests)**:
+  - `AuditRedactionControllerWebMvcTest` (6 tests): MockMvc slice tests for redaction requests, parameter validation, and KMS error translation.
+  - `AuditRedactionServiceIntegrationTests` (9 tests): Legacy plaintext soft-masking, encrypted envelope crypto-shredding, `PAYLOAD_REDACTED` meta-event append, exactly-once reconciliation discovery, and concurrent redaction serialization.
+- **Export Bundles & Independent Verification (35 tests)**:
+  - `AuditExportControllerWebMvcTest` (7 tests): MockMvc slice tests for actor/resource mutual exclusivity, validation, and bounded limit rejection (HTTP 413).
+  - `AuditExportIntegrationTests` (10 tests): Repeatable-read snapshot consistency, witness generation, soft-archived event inclusion, crypto-shredded envelope retention, and Java/Python verifier execution.
+  - `StandaloneExportVerifierTest` (18 tests): Verifier unit tests covering valid bundles, tampered payloads, sequence gaps, witness hash tampering, chain head tampering, filter mismatches, legacy masked bundles (`PARTIALLY_VERIFIED_REDACTED`), sequence range bounds `[1, headSeq]`, duplicate sequence rejection, and Python script parity.
 - **Compliance & Regulator Auditing (13 tests)**:
   - `AuditComplianceControllerWebMvcTest` (7 tests): MockMvc slice tests for mandatory `accountId` validation, parameter parsing, and fail-closed error translation (HTTP 503/500).
   - `AuditComplianceIntegrationTests` (6 tests): Account and resource-type isolation, supervisory event append, recursion loop exclusion, soft-archival inclusion, structured redaction masking, Java and Python export verification, and full-chain verification.
-- **Security & Authorization (47 tests)**:
-  - `AuditSecurityIntegrationTests` (38 tests): Authentication and authorization across writer, auditor, and regulator roles, including 401 unauthenticated, 403 role denials, and default-deny protection.
+- **Rate Limiting & Hardening (16 tests)**:
+  - `RateLimitingFilterTest` (15 tests): Token bucket algorithms, thread safety, bounded capacity eviction, refill calculation, and pre/post auth filter unit behavior.
+  - `RateLimitingSecurityIntegrationTests` (1 test): Full Spring Security context integration testing of principal burst allowance and HTTP 429 throttling with `Retry-After`.
+- **Security & Authorization (50 tests)**:
+  - `AuditSecurityIntegrationTests` (41 tests): Authentication and authorization across writer, auditor, and regulator roles, including 401 unauthenticated, 403 role denials, default-deny protection, and idempotency key persistence.
   - `SecurityCredentialValidationTests` (9 tests): Production startup fail-fast validation for missing, short, or insecure credentials across writer, auditor, and regulator accounts.
-- **Database Migrations & Infrastructure (24 tests)**:
-  - `FlywayMigrationIntegrationTests` (21 tests): Structural validation of Flyway migrations V1–V4, column types, foreign keys, triggers, and role privilege separation.
+- **Database Migrations & Infrastructure (22 tests)**:
+  - `FlywayMigrationIntegrationTests` (21 tests): Structural validation of Flyway migrations V1–V5 (including V5 idempotency records), column types, foreign keys, triggers, and role privilege separation.
   - `AuditLogServiceApplicationTests` (1 test): Spring Boot context loading.
-  - `PostgresContainerSanityTests` (1 test): Container sanity check.
-  - `ProductionEnvironmentPostgresValidationTests` (1 test): Production configuration sanity check.
 
 ## Independent Export Bundle Verification
 
@@ -212,6 +212,12 @@ mvn spring-boot:run -Dspring-boot.run.profiles=local
    - *Behavior*: If the subsequent data query fails, an immutable audit event records that the examination query was initiated, accurately reflecting regulatory supervisory intent.
 5. **Data Plane vs. Audit Plane Separation**:
    - The Audit Log Service acts as the authoritative *Audit Plane*. It records access events emitted by upstream banking systems (teller applications, online banking, CRM) via authenticated ingestion. Direct out-of-band queries against upstream business databases that do not emit audit events are outside the service boundary.
+6. **Rate Limiting Boundary & Distributed Topologies**:
+   - The prototype rate limiter uses an in-memory, thread-safe `TokenBucketRateLimiter` with bounded capacity, per-key fine-grained locking, and safe background eviction.
+   - *Limitation*: In a horizontally scaled, multi-instance deployment behind an ingress load balancer, node-local limiters do not coordinate token consumption across replicas. Production architectures delegate global rate limiting to an API gateway tier (e.g., Envoy, Kong) or back token accounting with a distributed high-throughput store (e.g., Redis token bucket). Additionally, client IP extraction in production requires `RemoteIpFilter` with explicitly configured trusted internal proxy CIDRs to prevent header spoofing via untrusted `X-Forwarded-For` injection.
+7. **TLS Termination & Network Perimeter**:
+   - The Spring Boot microservice container listens on HTTP internally, designed to operate within a private VPC or Kubernetes service mesh (e.g., Istio, Linkerd) where sidecars manage mutual TLS (mTLS) and pod-to-pod encryption transparently.
+   - *Boundary*: Public TLS 1.3 encryption and external client certificate validation terminate at the cloud perimeter ingress or reverse proxy layer (e.g., AWS ALB, Cloudflare, Envoy), maintaining clean separation between network boundary encryption and application business logic.
 
 ## Repository Scope
 
