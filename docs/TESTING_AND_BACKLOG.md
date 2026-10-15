@@ -217,13 +217,49 @@ The full Maven test suite passed under Java 17.0.16 with **203 tests run, 0 fail
   - `v4EnforcesAuditAppPrivilegesOnRedactionTable`: confirms `audit_app` role has `SELECT`, `INSERT`, and restricted `UPDATE (status, redacted_at, meta_audit_sequence_no)` only; attempts to update immutable metadata (`reason`, `field_path`, etc.) fail with `42501 permission denied`; `DELETE` and `TRUNCATE` fail with permission denied.
   - `v4EnforcesRedactionLifecycleTrigger`: trigger rejects invalid transition `PENDING -> COMPLETED` directly; rejects transition to `COMPLETED` without valid `meta_audit_sequence_no`; permanently seals completed records (`55000: record is sealed and immutable once COMPLETED`); delete trigger prohibits `DELETE` and `TRUNCATE` even for administrative roles (`55000`).
   - `v4RejectsDuplicateMetaAuditOperationIdOnAuditEvent`: confirms partial unique index `idx_audit_event_meta_redaction_op` enforces uniqueness on `audit_event` for `PAYLOAD_REDACTED` events and rejects duplicate operation IDs with SQLState `23505`.
-- **`AuditSecurityIntegrationTests` (21 tests, 3 new)**: Security role verification on redaction routes:
-  - `POST /audit/events/{eventId}/redact` unauthenticated returns HTTP 401 with `WWW-Authenticate` header.
-  - `POST /audit/events/{eventId}/redact` with `AUDITOR` role returns HTTP 403 Forbidden without `WWW-Authenticate` header.
-  - `POST /audit/events/{eventId}/redact` with `AUDIT_WRITER` role is authorized.
-- **`AuditQueryIntegrationTests` (14 tests, 1 new)**:
-  - `testQueryReturnsRedactedFieldProjectionWhilePreservingHashes`: verifies that `GET /audit/events` returns `"[REDACTED]"` for redacted field paths while preserving original immutable `contentHash` and `recordHash`.
-- **Previous baseline tests (177 tests)**: All 18 append WebMvc tests, 7 append integration tests, 10 query WebMvc tests, 13 query integration tests, 3 verify WebMvc tests, 16 verify integration tests, 18 security integration tests, 7 credential validation tests, 5 archival WebMvc tests, 6 retention validation tests, 9 archival service tests, 29 hash unit tests, 18 append service tests, 17 Flyway migration tests, and 1 smoke test continue to pass with 0 regressions.
+- **`AuditExportControllerWebMvcTest` (7 tests, NEW in Milestone 11)**:
+  - `exportWithValidActorIdReturns200`: confirms HTTP 200, JSON schema, and parameter mapping for `actorId`.
+  - `exportWithValidResourceIdReturns200`: confirms HTTP 200, JSON schema, and parameter mapping for `resourceId`.
+  - `exportWithBothFiltersReturns400`: confirms mutual exclusivity rejection with HTTP 400 Bad Request.
+  - `exportWithNeitherFilterReturns400`: confirms missing filter rejection with HTTP 400 Bad Request.
+  - `exportWithBlankActorIdReturns400`: confirms whitespace-only `actorId` rejection with HTTP 400.
+  - `exportWithBlankResourceIdReturns400`: confirms whitespace-only `resourceId` rejection with HTTP 400.
+  - `exportPayloadTooLargeReturns413`: confirms rejection with HTTP 413 Payload Too Large when export exceeds configured bounds.
+- **`StandaloneExportVerifierTest` (18 tests, NEW in Milestone 11)**:
+  - `emptyChainVerifiesIntact`: confirms empty bundle with head sequence 0 and genesis hash verifies as INTACT.
+  - `validMixedBundleVerifiesIntact`: confirms mixed matched events and witness nodes verify as INTACT.
+  - `tamperedPayloadFailsContentHash`: confirms payload modification triggers `CONTENT_HASH_MISMATCH`.
+  - `missingSequenceFailsSequenceGap`: confirms omitted sequence number triggers `SEQUENCE_GAP`.
+  - `tamperedWitnessHashFails`: confirms altered witness hash triggers `RECORD_HASH_MISMATCH`.
+  - `tamperedChainHeadFails`: confirms altered chain head checkpoint triggers `CHAIN_HEAD_MISMATCH`.
+  - `eventFilterMismatchFails`: confirms event actorId mismatch with filter triggers rejection.
+  - `legacyMaskedEventReturnsPartiallyVerifiedRedacted`: confirms legacy masked events return `PARTIALLY_VERIFIED_REDACTED` with verified chain linkage and unverified masked payload.
+  - `cryptoShreddedEventReturnsIntact`: confirms crypto-shredded records with `EncryptedEnvelope` return `INTACT` and 100% content verified.
+  - `tamperedCryptoShreddedEnvelopeFailsContentHash`: confirms tampered ciphertext in encrypted envelope triggers content hash failure (`CORRUPTED`).
+  - `tamperedLinkageInMaskedEventFails`: confirms tampered `previousHash` in legacy masked event triggers previous hash failure (`CORRUPTED`).
+  - `eventSequenceGreaterThanHeadFails`: confirms event with sequence number > chainHead is rejected with `CORRUPTED`.
+  - `eventSequenceZeroOrNegativeFails`: confirms event with sequence number <= 0 is rejected with `CORRUPTED`.
+  - `witnessSequenceOutOfBoundsFails`: confirms witness with sequence number outside valid range is rejected with `CORRUPTED`.
+  - `duplicateEventSequenceFails`: confirms duplicate sequence numbers within events are rejected with `CORRUPTED`.
+  - `duplicateWitnessSequenceFails`: confirms duplicate sequence numbers within witnesses are rejected with `CORRUPTED`.
+  - `duplicateSequenceAcrossEventsAndWitnessesFails`: confirms sequence collisions across events and witnesses are rejected with `CORRUPTED`.
+  - `pythonVerifierRejectsOutOfRangeAndDuplicates`: confirms standalone Python script `scripts/verify_export.py` rejects out-of-range and duplicate sequences with exit code 1.
+- **`AuditExportIntegrationTests` (10 tests, NEW in Milestone 11)**:
+  - `testExportEmptyDatabase`: confirms empty database returns 200 OK with valid empty bundle.
+  - `testExportByActorIdWithWitnesses`: confirms sparse export by `actorId`, verifies via `StandaloneExportVerifier` (Java), and executes standalone Python script `scripts/verify_export.py` to assert exit code 0.
+  - `testExportByResourceId`: confirms sparse export by `resourceId` and verification.
+  - `testExportSoftArchivedEvents`: confirms soft-archived events (Milestone 9) are included with `archivedAt` populated when `includeArchived=true`, and demoted to witness nodes when `includeArchived=false`.
+  - `testExportWithCryptoShreddedEvent`: confirms crypto-shredded records (Milestone 10) retain ciphertext envelope, recompute content hash cleanly, include the accompanying `PAYLOAD_REDACTED` meta-event, and verify as INTACT.
+  - `testExportWithLegacyMaskedRedactedEvent`: confirms legacy plaintext redacted fields are masked (`"[REDACTED]"`) in export projections without leaking sensitive plaintext, and verifies as `PARTIALLY_VERIFIED_REDACTED` in both Java and Python verifiers.
+  - `testCompletenessBoundaryDemonstration`: empirically demonstrates the documented completeness boundary (sparse-chain exports prove inclusion/authenticity, but cannot prove non-omission of events without zero-knowledge proofs or witness payload disclosure).
+  - `testExportExceedingMaxMatchedEventsReturns413`: confirms bounded export enforcement rejecting requests matching > `maxMatchedEvents` with HTTP 413 Payload Too Large.
+  - `testExportExceedingMaxTotalRecordsReturns413`: confirms bounded export enforcement rejecting requests where total chain > `maxTotalRecords` with HTTP 413 Payload Too Large.
+  - `testExportTransactionSnapshotConsistency`: confirms `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)` snapshot consistency.
+- **`AuditSecurityIntegrationTests` (24 tests, 3 new in Milestone 11)**:
+  - `getExports_unauthenticated_returns401`: confirms HTTP 401 with `WWW-Authenticate` header.
+  - `getExports_writerRole_returns403`: confirms `AUDIT_WRITER` role is rejected with HTTP 403 Forbidden.
+  - `getExports_auditorRole_returns200`: confirms `AUDITOR` role is authorized (HTTP 200).
+- **Previous baseline tests (205 tests)**: All 205 previously existing tests continue to pass with 0 regressions. Total test suite now stands at **243 passing tests**.
 
 ## Prioritized backlog
 
@@ -237,7 +273,7 @@ The full Maven test suite passed under Java 17.0.16 with **203 tests run, 0 fail
 8. [x] Add Spring Security, role authorization (`AUDIT_WRITER`, `AUDITOR`), and security tests. (Milestone 8, `d69a172`)
 9. [x] Implement Scenario B configurable retention, soft archival (`POST /audit/archive/**`), Flyway V3 archive schema, and query filtering. (Milestone 9)
 10. [x] Implement Scenario B structured payload redaction (`POST /audit/events/{eventId}/redact`), pluggable `KeyManager`, AES-256-GCM envelopes, crypto-shredding, Flyway V4 redaction metadata/triggers, and query projection masking. (Milestone 10)
-11. [ ] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains.
+11. [x] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains. (Milestone 11)
 12. [ ] Finalize Scenario C clarification, selected implementation slice, and scope-boundary evidence.
 13. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
 

@@ -38,7 +38,7 @@ import org.springframework.util.StringUtils;
  */
 @Configuration
 @EnableWebSecurity
-@EnableConfigurationProperties({SecurityUserProperties.class, AuditRetentionProperties.class})
+@EnableConfigurationProperties({SecurityUserProperties.class, AuditRetentionProperties.class, com.example.auditlog.export.AuditExportProperties.class})
 public class SecurityConfiguration {
 
     private static final Set<String> INSECURE_PASSWORDS = Set.of(
@@ -64,6 +64,7 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.POST, "/audit/events/*/redact").hasRole("AUDIT_WRITER")
                         .requestMatchers(HttpMethod.GET, "/audit/events").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.GET, "/audit/verify").hasRole("AUDITOR")
+                        .requestMatchers(HttpMethod.GET, "/audit/exports").hasRole("AUDITOR")
                         .requestMatchers(HttpMethod.POST, "/audit/archive/**").hasRole("AUDIT_WRITER")
                         .anyRequest().denyAll()
                 );

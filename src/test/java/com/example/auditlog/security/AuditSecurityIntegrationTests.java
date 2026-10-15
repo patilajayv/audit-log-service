@@ -400,6 +400,44 @@ class AuditSecurityIntegrationTests {
     }
 
     // =========================================================================
+    // GET /audit/exports Authentication & Authorization
+    // =========================================================================
+
+    @Test
+    @DisplayName("GET /audit/exports without authentication returns 401 with WWW-Authenticate header")
+    void getExports_unauthenticated_returns401() {
+        ResponseEntity<ErrorResponse> response = restTemplate.getForEntity(
+                "/audit/exports?actorId=alice", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
+                .isEqualTo("Basic realm=\"AuditLogService\"");
+    }
+
+    @Test
+    @DisplayName("GET /audit/exports with AUDIT_WRITER role returns 403 Forbidden without WWW-Authenticate header")
+    void getExports_writerRole_returns403() {
+        TestRestTemplate writerTemplate = restTemplate.withBasicAuth("test-writer", "test-writer-password-123");
+        ResponseEntity<ErrorResponse> response = writerTemplate.getForEntity(
+                "/audit/exports?actorId=alice", ErrorResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.WWW_AUTHENTICATE)).isFalse();
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().status()).isEqualTo(403);
+    }
+
+    @Test
+    @DisplayName("GET /audit/exports with AUDITOR role succeeds with 200 OK")
+    void getExports_auditorRole_returns200() {
+        TestRestTemplate auditorTemplate = restTemplate.withBasicAuth("test-auditor", "test-auditor-password-123");
+        ResponseEntity<String> response = auditorTemplate.getForEntity(
+                "/audit/exports?actorId=alice", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    // =========================================================================
     // Database Invariant Verification
     // =========================================================================
 

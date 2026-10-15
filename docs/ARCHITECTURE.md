@@ -294,9 +294,51 @@ Production controls would add centralized identity (OIDC/OAuth2/mTLS), short-liv
    - Lifecycle trigger `trg_audit_event_redaction_lifecycle` permanently seals completed records (`55000: record is sealed and immutable once COMPLETED`), validates state transitions (`PENDING -> KEY_DESTROYED -> COMPLETED`), and mandates a positive `meta_audit_sequence_no`.
    - Delete trigger `trg_audit_event_redaction_no_delete` prohibits `DELETE` and `TRUNCATE` operations (`55000`).
 
-### Export bundles (Scenario B)
+### Export bundles with independent verification (Scenario B)
 
-An export includes selected canonical events, their hashes, a hash-only witness sequence between the first and last selected record, and the observed chain-head checkpoint. Recipients can recompute selected hashes and link continuity using the bundle.
+The service provides `GET /audit/exports` (implemented by `AuditExportController` and `AuditExportService`) to generate self-contained, versioned, independently verifiable audit bundles:
+
+1. **Filtering and Mutual Exclusivity**:
+   - Requires either `actorId` or `resourceId`. Supplying both or neither returns sanitized HTTP 400 `ErrorResponse`.
+   - Blank values are actively rejected with HTTP 400.
+   - `includeArchived` defaults to `true`, ensuring complete regulatory history is captured. Callers specifying `includeArchived=false` demote soft-archived records to witness nodes.
+   - Requires authentication with role `AUDITOR` (HTTP 401 unauthenticated, HTTP 403 `AUDIT_WRITER`).
+
+2. **Snapshot Consistency & Bounded Limits**:
+   - Runs in a point-in-time database snapshot transaction under `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)`.
+   - Observes the singleton `audit_chain_head` row at transaction start to capture `(snapshotHeadSeq, snapshotHeadHash)`.
+   - Enforces configurable upper bounds via `AuditExportProperties`:
+     - `maxMatchedEvents` (default: 1,000): prevents memory exhaustion if a filter matches an unbounded volume of events. Exceeding the limit halts export immediately with a sanitized HTTP 413 `Payload Too Large` response.
+     - `maxTotalRecords` (default: 10,000): bounds the total genesis-to-head witness chain length. Exceeding the limit halts export with HTTP 413.
+   - Queries stream records strictly up to `sequence_no <= snapshotHeadSeq` ordered by `sequence_no ASC`. Because PostgreSQL holds a repeatable read snapshot across the queries, concurrent appends advancing the chain head or redacting records during export generation never produce dangling witness links, phantom events, or inconsistent redaction projections.
+   - Deterministic JCS canonicalization (RFC 8785) ensures byte-for-byte reproducible content hashes.
+
+3. **Sparse-Chain Witness Mechanics**:
+   - Because filtering produces non-contiguous sequence numbers, the export bundle includes:
+     - `events`: Full canonical records (with complete JSON payload) for all events matching the filter.
+     - `witnesses`: Compact, privacy-preserving witness nodes $(\text{sequenceNo}, \text{previousHash}, \text{contentHash}, \text{recordHash})$ for non-matching records, connecting genesis ($0^{64}$) through to `chainHead`.
+   - Discloses zero sensitive plaintext payloads, actor IDs, or resource IDs for intermediate events, while providing the exact hashes needed to recalculate the unbroken chain.
+
+4. **Cross-Milestone Synthesis (Archival & Redaction)**:
+   - **Soft Archival (Milestone 9)**: Returns active and soft-archived events by default (`includeArchived=true`), with `archivedAt` populated from `audit_event_archive`. Physical rows in `audit_event` are untouched, ensuring 100% hash verification pass.
+   - **Structured Redaction (Milestone 10)**:
+     - For crypto-shredded records (`CRYPTO_SHREDDED`), the stored ciphertext envelope is preserved in `payload`, allowing exact recalculation of `contentHash` while key destruction guarantees mathematical confidentiality. The accompanying `PAYLOAD_REDACTED` meta-event is returned as verifiable evidence. Both Java and Python verifiers report `status = INTACT`.
+     - For legacy plaintext records (`MASKED`), projection masking (`"[REDACTED]"`) is applied to prevent leaking sensitive plaintext. Because the original plaintext is omitted from the export, recomputing the content hash over the masked JSON cannot match the stored ingestion hash commitment. The verifier verifies previous-hash linkage and record-hash commitments against stored hashes, but reports `status = PARTIALLY_VERIFIED_REDACTED`, explicitly distinguishing verified chain linkage from unverifiable masked payload content.
+
+5. **Independent Verification Algorithm & Tooling**:
+   - Standalone verifiers (`StandaloneExportVerifier` in Java, and `scripts/verify_export.py` in Python 3 standard library):
+     1. Verifies sequence contiguity from sequence 1 to `chainHead.sequenceNo`.
+     2. Verifies genesis hash linkage at sequence 1 ($0^{64}$).
+     3. For unredacted and crypto-shredded events, recalculates RFC 8785 canonical content hash and asserts equality with stored `contentHash`.
+     4. For legacy masked events, skips payload hash recomputation, verifies chain commitments, and increments `maskedEventsCount`.
+     5. Recalculates domain-separated SHA-256 record hash for all records (events + witnesses) and verifies previous-hash linkage across every step.
+     6. Verifies tail alignment against `chainHead.recordHash`.
+     7. Asserts filter conformance for every exported event.
+     8. Returns `INTACT` if all records match and zero masked events exist; returns `PARTIALLY_VERIFIED_REDACTED` if hash chain linkage is intact but legacy masked events are present; returns `CORRUPTED` on any link, hash, sequence, or filter failure.
+
+6. **Security and Trust Boundaries**:
+   - **Relative Trust Anchor**: The bundle's `chainHead` is an internal point-in-time database commitment. Detecting complete database history rewriting by a superuser requires an independently notarized external anchor.
+   - **Inclusion vs. Completeness**: The bundle mathematically proves authenticity, tamper-evidence, and chain inclusion of all exported records. It cannot prove non-omission of matching records without disclosing intermediate third-party payloads or employing zero-knowledge set-membership proofs.
 
 ## Threat model and limitations
 

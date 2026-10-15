@@ -96,7 +96,15 @@ This document separates assignment requirements from engineering choices. "Requi
   - Database enforcement (Flyway V4): column-level grants restrict `audit_app` to `UPDATE (status, redacted_at, meta_audit_sequence_no)` only; lifecycle triggers prevent metadata tampering and permanently seal records once `COMPLETED`; delete triggers prohibit `DELETE` and `TRUNCATE`.
   - Prototype key management: `InMemoryKeyManager` software implementation is provided strictly for test/prototype validation; its production limitations (in-memory volatility, JVM heap scraping, lack of HSM isolation) are explicitly documented.
   - Read projection masking: `GET /audit/events` masks completed redacted fields with `"[REDACTED]"` while preserving original `contentHash` and `recordHash`.
-- **Verifiable export bundle**: The export bundle will include selected full records and hash-only witness records needed to establish continuity between the first and last selected sequence, alongside the observed chain-head checkpoint.
+- **Verifiable export bundle (`GET /audit/exports`)**:
+  - Implemented with mutual exclusivity between `actorId` and `resourceId` (exactly one required, blank rejected with HTTP 400).
+  - Defaults `includeArchived` to `true` to ensure completeness of regulatory bundles; allows `includeArchived=false` to demote archived events to witness records.
+  - Generates versioned, self-contained bundles (`bundleVersion: "1.0"`) under point-in-time snapshot-consistent read transactions (`@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)`).
+  - Enforces configurable upper bounds (`AuditExportProperties` with `maxMatchedEvents = 1000` and `maxTotalRecords = 10000`), rejecting oversized export requests immediately with HTTP 413 `Payload Too Large` to safeguard against memory exhaustion.
+  - Includes full canonical events for matched records and compact, privacy-preserving witness nodes $(\text{sequenceNo}, \text{previousHash}, \text{contentHash}, \text{recordHash})$ for non-matching records, establishing an unbroken genesis-to-head hash chain.
+  - Cross-milestone synthesis: soft-archived records have `archivedAt` populated while physical rows remain immutable; crypto-shredded envelopes preserve ciphertext for exact hash recalculation (`INTACT`); legacy masked records mask projections with `"[REDACTED]"` and verify chain commitments as `PARTIALLY_VERIFIED_REDACTED` without falsely asserting payload content-hash matching.
+  - Zero sensitive plaintext or destroyed keys are disclosed in witness records or projections.
+  - Independent verification: verified via `StandaloneExportVerifier` (Java) and `scripts/verify_export.py` (Python 3 standard library).
 
 ### Acceptance criteria
 
@@ -104,7 +112,7 @@ This document separates assignment requirements from engineering choices. "Requi
 - Normal queries omit archived events by default, but expose them with `archivedAt` when explicitly requested. *(Verified in `AuditQueryIntegrationTests`)*
 - A redacted response never exposes protected plaintext, while the original ciphertext envelope remains verifiable and `GET /audit/verify` returns `INTACT`. *(Verified in `AuditRedactionServiceIntegrationTests`)*
 - Retrying redaction is idempotent and never creates duplicate meta-audit events. *(Verified in `AuditRedactionServiceIntegrationTests`)*
-- An exported bundle verifies selected event content and chain continuity using only its contents, subject to the trusted-anchor limitation recorded below.
+- An exported bundle verifies selected event content and chain continuity using only its contents, subject to the trusted-anchor limitation. Crypto-shredded events verify as `INTACT`, and legacy masked events verify chain linkage as `PARTIALLY_VERIFIED_REDACTED`. *(Verified in `AuditExportControllerWebMvcTest`, `StandaloneExportVerifierTest`, `AuditExportIntegrationTests`, and `AuditSecurityIntegrationTests`)*
 
 ## Scenario C: Compliance Reporting
 

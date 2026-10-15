@@ -253,3 +253,58 @@ This log records AI-assisted work honestly. Each future entry will identify the 
   - Corrected `idx_audit_event_meta_redaction_op` to `CREATE UNIQUE INDEX` in `V4__add_audit_event_redaction.sql`.
   - Extracted `AuditRedactionCoordinator` as a dedicated Spring `@Component` with an active `@Transactional` boundary, acquiring a pessimistic row lock (`SELECT ... FOR UPDATE`) on `audit_event_redaction` before reconciliation discovery and meta-event append.
   - Added unit/integration tests confirming: (a) PostgreSQL rejects duplicate meta-audit operation IDs with SQLState `23505`; (b) independent concurrent transactions serialize via `SELECT ... FOR UPDATE` and produce exactly one meta-event append; (c) full test suite of 205 tests passes cleanly with 0 regressions.
+
+## Milestone 11: Bulk Export with Independent Verification
+
+- **Task intent:**
+  - Satisfy Scenario B bulk export requirement: provide an endpoint to export all records for a given `resourceId` or `actorId` as a self-contained, verifiable bundle with enough chain metadata for a recipient to independently verify records have not been altered since export.
+- **AI contribution:**
+  - Authored comprehensive architectural design in `docs/milestone11-design.md`, resolving the non-contiguous filtering dilemma via sparse hash-chain witness sequences from genesis ($0^{64}$) to the observed `chainHead`.
+  - Explicitly documented critical security and trust boundaries: (a) chain-head checkpoint is an internal point-in-time database commitment, requiring an out-of-band anchor for absolute non-repudiation against superuser history rewriting; (b) sparse chains prove authenticity and tamper-evidence, but cannot prove non-omission of events without disclosing third-party payloads or using zero-knowledge proofs; (c) privacy analysis showing intermediate SHA-256 witness hashes disclose zero sensitive plaintext and are protected against dictionary attacks by high-entropy event metadata (`eventId`, `recordedAt`).
+  - Created domain model and versioned DTOs (`bundleVersion: "1.0"`) in `com.example.auditlog.export`: `ExportFilterCriteria`, `ExportFilterDto`, `ExportChainHeadDto`, `ExportSummaryDto`, `ExportEventDto`, `ExportWitnessDto`, `ExportBundleDto`.
+  - Implemented `AuditExportService` executing under read-only snapshot transaction (`@Transactional(readOnly = true)`), capturing the chain head, streaming records up to head sequence ordered by `sequence_no ASC`, partitioning into full canonical events and compact witness nodes, populating `archivedAt` for soft-archived records (Milestone 9), and masking legacy plaintext redactions (Milestone 10).
+  - Implemented `AuditExportController` (`GET /audit/exports`) with strict validation (mutual exclusivity, non-blank checks, sanitized `ErrorResponse`).
+  - Updated `SecurityConfiguration` authorizing `GET /audit/exports` for `AUDITOR` role (HTTP 401 for anonymous, HTTP 403 for `AUDIT_WRITER`).
+  - Implemented independent verifiers:
+    - Embedded Java verifier `StandaloneExportVerifier` for automated in-process test assertions.
+    - Zero-dependency standalone Python verification script `scripts/verify_export.py` using standard library modules only (`hashlib`, `json`, `struct`).
+  - Implemented 23 new tests:
+    - `AuditExportControllerWebMvcTest` (6 tests): valid `actorId`, valid `resourceId`, mutual exclusivity rejection (HTTP 400), missing filter rejection (HTTP 400), blank filter rejections (HTTP 400).
+    - `StandaloneExportVerifierTest` (7 tests): empty chain verification, valid mixed bundle verification, tampered payload detection (`CONTENT_HASH_MISMATCH`), sequence gap detection (`SEQUENCE_GAP`), tampered witness hash detection (`RECORD_HASH_MISMATCH`), tampered chain head detection (`CHAIN_HEAD_MISMATCH`), filter mismatch detection.
+    - `AuditExportIntegrationTests` (7 tests): empty database export, export by `actorId` verified by Java and Python script, export by `resourceId`, soft-archival integration (included by default, excluded when `includeArchived=false`), crypto-shredded envelope export with intact ciphertext and accompanying `PAYLOAD_REDACTED` meta-event, legacy masked export, and completeness boundary empirical demonstration.
+    - `AuditSecurityIntegrationTests` (3 new tests, 24 total): anonymous rejection (HTTP 401), writer rejection (HTTP 403), auditor authorized (HTTP 200).
+- **Engineer oversight:**
+  - Approved design decisions: mutually exclusive `actorId` and `resourceId`, default `includeArchived = true`, and genesis-to-head witness chain approach.
+  - Mandated explicit documentation of trust boundaries (relative vs. absolute trust anchors, authenticity vs. completeness, privacy of witness hashes, deterministic snapshots).
+  - Enforced zero schema migrations (V1–V4 migrations remain untouched) as export is a pure read-only projection.
+  - Enforced local-only modification policy with no staging, committing, or pushing until reviewed.
+- **Decision:** Milestone 11 implementation complete. Changes uncommitted locally pending engineer review.
+- **Validation:**
+  - Automated test results under Java 17.0.16 / Maven 3.9.11:
+    - Full Maven test suite: **228 tests run, 0 failures, 0 errors, 0 skipped**.
+    - All 205 baseline tests passed with 0 regressions; all 23 new Milestone 11 tests passed cleanly.
+  - Python standalone script verification: executed against real export bundles via `ProcessBuilder`, verified exit code 0 and valid output.
+  - `git diff --check` passed with 0 errors.
+
+### Hardening pass (Review findings resolution)
+
+- **Legacy masked payload verification**:
+  - Distinguished `INTACT` (full content hash recalculation across unredacted and crypto-shredded events) from `PARTIALLY_VERIFIED_REDACTED` (verified chain linkage, sequence contiguity, and record-hash commitments, while explicitly declaring masked original payloads as unverifiable against ingestion content hashes).
+  - Synchronized Java verifier (`StandaloneExportVerifier`) and standalone Python script (`scripts/verify_export.py`) to report identical status and counts (`maskedEventsCount` / `maskedEvents`).
+  - Added unit and integration tests covering unredacted events, crypto-shredded envelopes, and legacy masked events in both Java and Python verifiers.
+- **Consistent database snapshot**:
+  - Enforced `Isolation.REPEATABLE_READ` on `@Transactional(readOnly = true)` in `AuditExportService.exportBundle` to guarantee consistent point-in-time PostgreSQL snapshot isolation across the chain-head read, event stream, and redaction metadata queries.
+  - Added integration test confirming transactional isolation attributes and consistent snapshot execution.
+- **Bounded exports**:
+  - Added `AuditExportProperties` with configurable limits: `maxMatchedEvents` (default: 1,000) and `maxTotalRecords` (default: 10,000).
+  - Rejection with sanitized HTTP 413 `Payload Too Large` via `PayloadTooLargeException` upon exceeding either limit.
+  - Added unit and integration tests for boundary limits and overflow requests.
+- **Sequence Range and Exact Occurrence Hardening**:
+  - Enforced strict bounds checking `[1, chainHead.sequenceNo]` on all event and witness sequence numbers in both Java (`StandaloneExportVerifier`) and Python (`scripts/verify_export.py`).
+  - Enforced duplicate prevention within event collections, within witness collections, and across event/witness boundaries.
+  - Enforced exact occurrence and total record count cardinality `len(events) + len(witnesses) == headSeq`.
+  - Added 7 focused unit and script parity regression tests in `StandaloneExportVerifierTest`.
+- **Validation results**:
+  - Full Maven test suite passed: **243 tests run, 0 failures, 0 errors, 0 skipped** across 21 test classes (38 new tests in Milestone 11 over Milestone 10 baseline of 205).
+  - `git diff --check` passed cleanly with 0 whitespace errors.
+  - Flyway migrations V1–V4 remain strictly untouched.
