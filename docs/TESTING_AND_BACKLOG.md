@@ -314,7 +314,7 @@ The full Maven test suite passed under Java 17.0.16 with **272 tests run, 0 fail
 10. [x] Implement Scenario B structured payload redaction (`POST /audit/events/{eventId}/redact`), pluggable `KeyManager`, AES-256-GCM envelopes, crypto-shredding, Flyway V4 redaction metadata/triggers, and query projection masking. (Milestone 10)
 11. [x] Implement verifiable export bundle (`GET /audit/exports`) with witness continuity chains. (Milestone 11)
 12. [x] Implement Scenario C regulator auditing of client account access, compliance query and constrained export endpoints, fail-closed supervisory auditing, and least-privilege authorization. (Milestone 12)
-13. [ ] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation.
+13. [x] Add final setup, test, limitation, AI-traceability, attestation, and live-defense documentation. (Milestone 13)
 
 ## Milestone discipline
 
